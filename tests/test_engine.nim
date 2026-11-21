@@ -130,8 +130,10 @@ proc testRetryOnceThenFallBack() =
   check(batchCalls.len == 2 and batchCalls[1].len == 4,
     "unusable replies did not receive exactly one retry")
   for seat in 0 ..< 4:
-    check(engine.stances[seat].source == stFallback,
-      "an unusable reply did not fall back")
+    check(engine.stances[seat].source == stFallback and
+      engine.stances[seat].fire == fmNever and
+      engine.stances[seat].riskMilli == 0,
+      "an unusable reply did not fall back to neutral hold")
   check(records.len >= 8, "attempt records were missing")
   report("one retry then game-owned fallback")
 

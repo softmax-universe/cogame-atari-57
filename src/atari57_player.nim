@@ -48,12 +48,17 @@ when isMainModule:
     numericUrl = getEnv("PLAYER_NUMERIC_URL").strip()
     prompt = getEnv("PLAYER_PROMPT").strip()
     scripted = getEnv("PLAYER_SCRIPTED").strip()
-    kind = if numericUrl.len > 0: "external" elif prompt.len > 0: "prompt" else: "scripted"
+    endpoint = getEnv("COWORLD_LLM_ENDPOINT").strip()
+    kind =
+      if numericUrl.len > 0: "external"
+      elif scripted.len > 0: "scripted"
+      elif prompt.len > 0 or endpoint.len > 0: "prompt"
+      else: "scripted"
     label = block:
       let explicit = getEnv("PLAYER_POLICY_LABEL").strip()
       if explicit.len > 0: explicit
       elif numericUrl.len > 0: "numeric"
-      elif prompt.len > 0: "prompt"
+      elif kind == "prompt": "prompt"
       elif scripted.len > 0: scripted
       else: "arcader"
   echo "atari-57 player: kind=",

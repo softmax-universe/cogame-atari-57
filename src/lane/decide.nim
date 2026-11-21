@@ -96,20 +96,30 @@ proc arcaderFor*(engine: DecisionEngine, sim: SimServer, seat: int): LaneStance 
   ## fallback, and the default for a seat that registers with neither env var.
   arcaderStance(sim, seat)
 
+proc holdFallbackStance*(): LaneStance =
+  ## Neutral hold stance when an LLM seat produces invalid or unavailable output.
+  ## Never substitutes the scripted `arcader` policy.
+  LaneStance(
+    note: "",
+    mode: mdSafe,
+    zone: znNone,
+    riskMilli: 0'i32,
+    leadTicks: 0'i32,
+    fire: fmNever,
+    say: "",
+    source: stFallback
+  )
+
 proc repairMissingFields*(
   engine: DecisionEngine, sim: SimServer, seat: int, stance: var LaneStance
 ) =
-  ## Design §Reply schema: a missing or unusable field keeps LAST turn's
-  ## value, else `arcader`'s. The parser already applied the per-field
-  ## repairs; this fills anything it could not.
+  ## A missing or unusable field keeps LAST turn's value, else neutral 0.
   if stance.leadTicks < 0 or stance.leadTicks > 48:
     stance.leadTicks =
-      if engine.haveStance[seat]: engine.stances[seat].leadTicks
-      else: arcaderFor(engine, sim, seat).leadTicks
+      if engine.haveStance[seat]: engine.stances[seat].leadTicks else: 0'i32
   if stance.riskMilli < 0 or stance.riskMilli > 1000:
     stance.riskMilli =
-      if engine.haveStance[seat]: engine.stances[seat].riskMilli
-      else: arcaderFor(engine, sim, seat).riskMilli
+      if engine.haveStance[seat]: engine.stances[seat].riskMilli else: 0'i32
 
 proc resultRecord*(sim: SimServer): string =
   ## The `result` control record — the whole results document, written once
@@ -169,16 +179,14 @@ proc turn*(
         not engine.batch.isNil:
       open.add(seat)
     elif engine.seats[seat].isLlm:
-      # An LLM seat that CANNOT call the LLM this turn is a FALLBACK, not a
-      # scripted policy, and recording it is what makes the two countable.
-      var stance = engine.arcaderFor(sim, seat)
-      stance.source = stFallback
-      engine.stances[seat] = stance
+      # An LLM seat that CANNOT call the LLM this turn executes a neutral hold
+      # rather than a scripted `arcader` policy.
+      engine.stances[seat] = holdFallbackStance()
       engine.haveStance[seat] = true
       let cause = if engine.llmOff: "budget_guard" else: "transport_error"
       result.add(fallbackRecord(turnIndex, seat, 1, cause,
-        "the LLM is unavailable for this turn; playing arcader"))
-      echo "atari-57 llm: seat ", seat, " falling back to arcader (", cause,
+        "the LLM is unavailable for this turn; holding neutral stance"))
+      echo "atari-57 llm: seat ", seat, " falling back to neutral hold (", cause,
         ") on turn ", turnIndex
     else:
       var stance = engine.scriptedFor(sim, seat, engine.seats[seat].baseline)
@@ -296,18 +304,16 @@ proc turn*(
         retryable.add(seat)
     open = retryable
 
-  # --- anything still open plays arcader for this turn ---------------------
+  # --- anything still open holds a neutral stance (never scripted arcader) -
   open.add(failFast)
   for seat in open:
-    var stance = engine.arcaderFor(sim, seat)
-    stance.source = stFallback
-    engine.stances[seat] = stance
+    engine.stances[seat] = holdFallbackStance()
     engine.haveStance[seat] = true
     let cause = if lastCause[seat].len > 0: lastCause[seat] else: "timeout"
     result.add(fallbackRecord(turnIndex, seat, 2, cause,
-      "seat fell back to the arcader stance"))
+      "seat fell back to neutral hold"))
     ## "falling back" is the phrase phase 60 greps the GAME log for.
-    echo "atari-57 llm: seat ", seat, " falling back to arcader (", cause,
+    echo "atari-57 llm: seat ", seat, " falling back to neutral hold (", cause,
       ") on turn ", turnIndex
 
   for seat in 0 ..< engine.seats.len:

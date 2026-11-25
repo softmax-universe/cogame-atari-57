@@ -209,11 +209,14 @@ docker run -d --name "${prefix}-game" \
 for ((slot = 0; slot < seats; slot++)); do
   eval "penv=( $(cat "${work_dir}/env-${slot}.args") )"
   eval "pcmd=( $(cat "${work_dir}/cmd-${slot}.args") )"
-  if [ -n "${COWORLD_LLM_ENDPOINT:-}" ] && [[ " ${penv[*]} " == *"PLAYER_PROMPT="* ]]; then
+  extra_docker_args=()
+  if [ -n "${COWORLD_LLM_ENDPOINT:-}" ] && { [[ " ${penv[*]} " == *"PLAYER_PROMPT="* ]] || [[ " ${penv[*]} " == *"COWORLD_LLM_ENABLED=true"* ]]; }; then
     penv+=(-e "COWORLD_LLM_ENDPOINT=${COWORLD_LLM_ENDPOINT}"
       -e "COWORLD_LLM_MODEL=${COWORLD_LLM_MODEL:-anthropic/claude-haiku-4.5}")
+    extra_docker_args+=(--add-host=host.docker.internal:host-gateway)
   fi
   docker run -d --name "${prefix}-p${slot}" --network "${network}" \
+    ${extra_docker_args[@]+"${extra_docker_args[@]}"} \
     -e COWORLD_PLAYER_WS_URL="ws://${prefix}-game:${port}/player?slot=${slot}&token=token-${slot}" \
     ${penv[@]+"${penv[@]}"} \
     "${image}" ${pcmd[@]+"${pcmd[@]}"} >/dev/null

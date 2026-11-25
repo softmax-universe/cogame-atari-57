@@ -46,10 +46,13 @@ for cartridge in ["chomper", "brickfall", "gallery"]:
 for cartridge in ["chomper", "brickfall", "gallery"]:
   rom = cartridge
   discard reset(%*{"seed": "7", "players": 4})
-  let completion = "Here is my stance:\n```json\n" & teacher()["response"].getStr() & "\n```"
-  let expected = parseLaneStance(extractJsonObject(completion), DefaultStance, false)
-  let applied = step(%*{"decision_id": 0, "response": completion})
-  doAssert applied["kind"].getStr() == "accepted", "native parser accepts this prose-wrapped stance"
+  let fenced = "```json\n" & teacher()["response"].getStr() & "\n```"
+  let expected = parseLaneStance(extractJsonObject(fenced))
+  let prose = "Here is my stance:\n" & fenced
+  doAssert step(%*{"decision_id": 0, "response": prose})["kind"].getStr() == "rejected",
+    "prose-wrapped stance must be rejected"
+  let applied = step(%*{"decision_id": 0, "response": fenced})
+  doAssert applied["kind"].getStr() == "accepted", "native parser accepts outer Markdown JSON fence"
   doAssert applied["action"] == stanceJson(expected)
   echo cartridge, " ordinary completion parser parity passed"
 

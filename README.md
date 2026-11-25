@@ -54,8 +54,8 @@ Prompt players use `COWORLD_LLM_ENDPOINT` and `COWORLD_LLM_MODEL`.
 Local prompt runs also require a reachable sidecar.
 
 Two scripted baselines ship in the same image, selected with
-`PLAYER_SCRIPTED`: **`arcader`** (the certification player, the per-turn
-fallback and the default — it clears screens and cashes chains) and
+`PLAYER_SCRIPTED`: **`arcader`** (the certification player and default scripted
+baseline — it clears screens and cashes chains) and
 **`hoover`** (deliberately weaker: it never dodges).
 
 The [training bridge](docs/TRAINING.md) exposes all three ROMs through the

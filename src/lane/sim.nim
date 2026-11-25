@@ -1081,6 +1081,13 @@ proc applyControlRecord*(sim: var SimServer, record: string) =
       elif node{"source"}.getStr() == "fallback":
         inc sim.fallbackTurns[seat]
     sim.pushFeedRecord(record)
+  of "missed_turn":
+    let seat = node{"seat"}.getInt()
+    if seat >= 0 and seat <= 3:
+      sim.seatMode[seat] = ""
+      sim.seatZone[seat] = ""
+      inc sim.fallbackTurns[seat]
+    sim.pushFeedRecord(record)
   of "fallback", "budget_guard", "result":
     sim.pushFeedRecord(record)
   else:

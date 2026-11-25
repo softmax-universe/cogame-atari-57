@@ -1,8 +1,9 @@
 ## Game-owned decisions over one bounded batch of ordinary player responses.
 
 import std/[json, monotimes, os, sequtils, strformat, times]
+import bitworld/decision_trajectory
 import lane_helpers
-import lane/[sim_types, decide, stances]
+import lane/[sim_types, decide, stances, control]
 
 const GoodAction = """{"mode":"hunt","zone":"sw","risk":0.55,
   "lead_ticks":16,"note":"take the power pellet","say":"going for it"}"""
@@ -22,10 +23,13 @@ proc fakeBatch(calls: seq[BatchCall], timeoutSeconds: int): seq[BatchReply]
       of "good":
         reply.ok = true
         reply.action = GoodAction
+      of "minimal":
+        reply.ok = true
+        reply.action = """{"mode":"hunt"}"""
       of "malformed":
         reply.ok = true
         reply.action = "no stance"
-      of "throttled", "no_endpoint", "timeout":
+      of "throttled", "no_endpoint", "auth_error", "transport_error", "timeout":
         reply.cause = behavior
         reply.error = behavior
       else:
@@ -72,8 +76,8 @@ proc testOverLanesAreDropped() =
   discard engine.turn(game, 1, 24, 0)
   check(batchCalls.len == 1 and batchCalls[0].len == 2,
     "finished lanes reached the player batch")
-  check(engine.stances[1].source == stScripted,
-    "a finished lane still used an external stance")
+  check(not engine.haveStance[1],
+    "a finished lane still installed a stance")
   report("finished lanes are omitted")
 
 proc testInterBatchFloor() =
@@ -103,10 +107,12 @@ proc testPerTurnBudgetWithAHungClient() =
   check((getMonoTime() - started).inMilliseconds < 3500,
     "a player timeout exceeded the turn budget")
   for seat in 0 ..< 4:
-    check(engine.stances[seat].source == stFallback,
-      "a timed-out player did not fall back")
+    check(not engine.haveStance[seat] and
+      engine.decisions[seat].status == asMissing and
+      engine.decisions[seat].executedAction.kind == JNull,
+      "a timed-out player synthesized a stance instead of missing the turn")
   check(records.len >= 4, "fallback records were missing")
-  report("bounded player timeouts fall back")
+  report("bounded player timeouts record missed turns with no synthesized stance")
 
 proc testThrottleSkipsTheRetry() =
   resetFake("throttled")
@@ -130,12 +136,30 @@ proc testRetryOnceThenFallBack() =
   check(batchCalls.len == 2 and batchCalls[1].len == 4,
     "unusable replies did not receive exactly one retry")
   for seat in 0 ..< 4:
-    check(engine.stances[seat].source == stFallback and
-      engine.stances[seat].fire == fmNever and
-      engine.stances[seat].riskMilli == 0,
-      "an unusable reply did not fall back to neutral hold")
+    check(not engine.haveStance[seat] and
+      engine.decisions[seat].status == asMissing and
+      engine.decisions[seat].executedAction.kind == JNull,
+      "an unusable reply synthesized a stance instead of missing the turn")
+  check(records.anyIt(parseJson(it){"k"}.getStr() == "missed_turn"),
+    "missed_turn record was missing")
   check(records.len >= 8, "attempt records were missing")
-  report("one retry then game-owned fallback")
+  report("one retry then missed turn (no synthesized stance, zero control byte)")
+
+proc testUnregisteredSeatDoesNotPlayBaseline() =
+  var config = testConfig(RomChomper, 5_140_913)
+  config.turnSpacingMs = 0
+  var game = seatedSim(config)
+  var engine = initDecisionEngine(game)
+  let records = engine.turn(game, 0, 24, 0)
+  for seat in 0 ..< 4:
+    check(not engine.haveStance[seat] and
+      engine.decisions[seat].status == asMissing and
+      engine.decisions[seat].executedAction.kind == JNull,
+      "an unregistered seat silently played a baseline")
+  check(records.anyIt(parseJson(it){"k"}.getStr() == "missed_turn" and
+    parseJson(it){"cause"}.getStr() == "unregistered"),
+    "unregistered missed_turn record was missing")
+  report("missing registration never silently selects a baseline")
 
 proc testBudgetGuard() =
   resetFake("good")
@@ -165,7 +189,43 @@ proc testNoCredentialsFallsBackInstantly() =
   check(batchCalls.len == 1, "missing credentials were retried")
   check(records.anyIt(parseJson(it){"cause"}.getStr() == "no_endpoint"),
     "the player cause did not reach the replay")
-  report("missing player credentials yield typed fallbacks")
+  check(engine.infraFault and engine.infraFaultCause == "no_endpoint" and
+    engine.hasUnrecoveredInfraOutage().fault,
+    "missing endpoint must flag an infrastructure outage fault")
+  report("missing player credentials fail fast and flag infrastructure outage")
+
+proc testAuthOutageAndOccasionalMissedTurn() =
+  resetFake("auth_error")
+  var config = testConfig(RomChomper, 5_140_913)
+  config.turnSpacingMs = 0
+  var game = seatedSim(config)
+  var engine = llmEngine(game)
+  let records = engine.turn(game, 0, 24, 0)
+  check(batchCalls.len == 1, "auth_error was retried")
+  check(records.anyIt(parseJson(it){"cause"}.getStr() == "auth_error"),
+    "auth_error cause did not reach the replay")
+  check(engine.infraFault and engine.infraFaultCause == "auth_error",
+    "auth_error must flag an infrastructure outage fault")
+
+  # Persistent transport_error with zero accepted turns is an unrecovered outage.
+  resetFake("transport_error")
+  var outageEngine = llmEngine(game)
+  discard outageEngine.turn(game, 0, 24, 0)
+  check(not outageEngine.infraFault, "single transport_error should not hard-fault mid-episode")
+  check(outageEngine.hasUnrecoveredInfraOutage().fault,
+    "zero accepted turns with transport_error must not complete as a scored episode")
+
+  # An occasionally missing real-time turn after a successful minimal-mode turn is allowed.
+  resetFake("minimal")
+  var mixedEngine = llmEngine(game)
+  discard mixedEngine.turn(game, 0, 24, 0)
+  check(mixedEngine.acceptedLlmTurns[0] == 1 and mixedEngine.stances[0].mode == mdHunt,
+    "minimal mode-only reply did not install")
+  resetFake("transport_error")
+  discard mixedEngine.turn(game, 1, 24, 0)
+  check(not mixedEngine.infraFault and not mixedEngine.hasUnrecoveredInfraOutage().fault,
+    "an occasionally missing real-time turn should still allow a normal episode")
+  report("auth/persistent outage faults; occasional missed real-time turn is allowed")
 
 proc testMinTicksHoldsTheEpisodeOpen() =
   ## The episode does not end on "all four lanes over" before `minTicks`: a
@@ -212,8 +272,10 @@ when isMainModule:
   testPerTurnBudgetWithAHungClient()
   testThrottleSkipsTheRetry()
   testRetryOnceThenFallBack()
+  testUnregisteredSeatDoesNotPlayBaseline()
   testBudgetGuard()
   testNoCredentialsFallsBackInstantly()
+  testAuthOutageAndOccasionalMissedTurn()
   testMinTicksHoldsTheEpisodeOpen()
   testWallClockStopIsRecorded()
   echo "test_engine OK"

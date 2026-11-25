@@ -22,7 +22,7 @@ for rom in ["chomper", "brickfall", "gallery"]:
           game.config.maxTicks div game.config.turnTicks, DefaultStance, false))
         doAssert features(view).len == NumericFeatures
         for choice in 0 ..< NumericActions:
-          let decoded = parseLaneStance(candidateStance(view, choice), DefaultStance, false)
+          let decoded = parseLaneStance(candidateStance(view, choice))
           if choice == 0:
             doAssert decoded.mode == original.mode
             doAssert decoded.zone == original.zone
@@ -42,7 +42,7 @@ for rom in ["chomper", "brickfall", "gallery"]:
     # Finished lanes are also ordinary private observations.
     for seat in 0 ..< 4:
       let view = parseJson(game.laneViewJson(seat, 0, 1, DefaultStance, false))
-      let decoded = parseLaneStance(candidateStance(view, 0), DefaultStance, false)
+      let decoded = parseLaneStance(candidateStance(view, 0))
       let original = arcaderStance(game, seat)
       doAssert decoded.mode == original.mode
       doAssert decoded.fire == original.fire

@@ -88,11 +88,11 @@ autopilot runs it 24 times a second: it does the pathfinding, the dodging, the
 aiming and the firing. You choose WHAT to go for and HOW MUCH RISK to take.
 """
 
-const OutputFormat = """Reply with a single JSON object and NOTHING else. Your reply MUST begin with '{'.
+const OutputFormat = """Reply with a single JSON object and NOTHING else (an outer ```json fence is also accepted).
+Only "mode" is required; omitted optional fields use fixed defaults.
 Schema:
-{"note":"<=160 chars, your reasoning",
- "mode":"clear"|"hunt"|"strike"|"safe"|"bank",
-   // clear  : take the nearest scoring thing, over and over. The default.
+{"mode":"clear"|"hunt"|"strike"|"safe"|"bank",   // REQUIRED
+   // clear  : take the nearest scoring thing, over and over.
    // hunt   : go for the HIGHEST-VALUE thing reachable (a power pellet, the top
    //          brick row, the top marcher row, the saucer) even if it is far.
    // strike : cash in. In CHOMPER chase fleeing hunters for the chain; in
@@ -103,13 +103,16 @@ Schema:
    // bank   : refuse every trade. Never enter a tile a threat can reach before
    //          you leave it. You will score slowly and you will not die.
  "zone":"nw"|"ne"|"sw"|"se"|"centre"|"left"|"right"|"top"|"bottom"|"none",
-                            // work in this part of YOUR screen; "none" = anywhere
- "risk":0.0..1.0,           // 0 = never let a threat within 4 tiles,
-                            // 1 = ignore threats entirely
- "lead_ticks":0..48,        // how long the autopilot commits to a chosen route
+                            // optional (default "none" = anywhere)
+ "risk":0.0..1.0,           // optional (default 0.5); 0 = keep threats 4+ tiles
+                            // away, 1 = ignore threats entirely
+ "lead_ticks":0..48,        // optional integer (default 14); route commit ticks
                             // before re-deciding (24 ticks = 1 second)
- "fire":"auto"|"hold"|"never",   // GALLERY only; ignored by the other roms
- "say":"<=48 chars"}        // spectators only; no cabinet ever sees it
+ "fire":"auto"|"hold"|"never",   // optional (default "auto"); GALLERY only
+ "note":"<=160 chars",      // optional reasoning
+ "say":"<=48 chars"}        // optional, spectators only; no cabinet sees it
+Example:
+{"mode":"hunt"}
 """
 
 const CanonicalSystemPrompt* = Introduction & Mechanics & Visibility & Cadence & OutputFormat

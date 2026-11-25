@@ -68,6 +68,11 @@ type
     lastBatchStart*: MonoTime
     batchStarted*: bool
     llmOff*: bool              ## the budget guard fired; scripted from here on
+    acceptedLlmTurns*: seq[int]
+    infraFailures*: seq[int]
+    infraFault*: bool
+    infraFaultSeat*: int
+    infraFaultCause*: string
     records*: seq[string]
     decisions*: seq[TurnDecision]
 
@@ -75,16 +80,31 @@ proc initDecisionEngine*(sim: SimServer): DecisionEngine =
   result.seats = newSeq[SeatPolicy](4)
   result.stances = newSeq[LaneStance](4)
   result.haveStance = newSeq[bool](4)
+  result.acceptedLlmTurns = newSeq[int](4)
+  result.infraFailures = newSeq[int](4)
+  result.infraFaultSeat = -1
   for i in 0 ..< result.seats.len:
     result.seats[i].baseline = blArcader
-    result.seats[i].label = "arcader"
+    result.seats[i].label = "unregistered"
     result.stances[i] = DefaultStance
 
+proc hasUnrecoveredInfraOutage*(
+  engine: DecisionEngine
+): tuple[fault: bool, seat: int, cause: string] =
+  if engine.infraFault:
+    return (true, engine.infraFaultSeat, engine.infraFaultCause)
+  for seat in 0 ..< engine.seats.len:
+    if engine.seats[seat].registered and engine.seats[seat].isLlm and
+        engine.acceptedLlmTurns[seat] == 0 and engine.infraFailures[seat] > 0:
+      return (true, seat, "provider_outage")
+  (false, -1, "")
+
 proc policyKind*(engine: DecisionEngine, seat: int): string =
-  if seat >= 0 and seat < engine.seats.len and engine.seats[seat].isLlm:
-    "llm"
-  else:
+  if seat >= 0 and seat < engine.seats.len and
+      engine.seats[seat].registered and not engine.seats[seat].isLlm:
     "scripted"
+  else:
+    "llm"
 
 proc scriptedFor(
   engine: DecisionEngine, sim: SimServer, seat: int, kind: Baseline
@@ -92,34 +112,8 @@ proc scriptedFor(
   scriptedStance(sim, seat, kind)
 
 proc arcaderFor*(engine: DecisionEngine, sim: SimServer, seat: int): LaneStance =
-  ## The published `arcader` stance — the certification player, the per-turn
-  ## fallback, and the default for a seat that registers with neither env var.
+  ## The published `arcader` stance for explicit `PLAYER_SCRIPTED=arcader` seats.
   arcaderStance(sim, seat)
-
-proc holdFallbackStance*(): LaneStance =
-  ## Neutral hold stance when an LLM seat produces invalid or unavailable output.
-  ## Never substitutes the scripted `arcader` policy.
-  LaneStance(
-    note: "",
-    mode: mdSafe,
-    zone: znNone,
-    riskMilli: 0'i32,
-    leadTicks: 0'i32,
-    fire: fmNever,
-    say: "",
-    source: stFallback
-  )
-
-proc repairMissingFields*(
-  engine: DecisionEngine, sim: SimServer, seat: int, stance: var LaneStance
-) =
-  ## A missing or unusable field keeps LAST turn's value, else neutral 0.
-  if stance.leadTicks < 0 or stance.leadTicks > 48:
-    stance.leadTicks =
-      if engine.haveStance[seat]: engine.stances[seat].leadTicks else: 0'i32
-  if stance.riskMilli < 0 or stance.riskMilli > 1000:
-    stance.riskMilli =
-      if engine.haveStance[seat]: engine.stances[seat].riskMilli else: 0'i32
 
 proc resultRecord*(sim: SimServer): string =
   ## The `result` control record — the whole results document, written once
@@ -160,7 +154,8 @@ proc turn*(
 
   engine.decisions = newSeq[TurnDecision](engine.seats.len)
   for seat in 0 ..< engine.seats.len:
-    engine.decisions[seat] = TurnDecision(status: asFallback,
+    engine.decisions[seat] = TurnDecision(status: asMissing,
+      executedAction: newJNull(),
       observation: parseJson(laneViewJson(sim, seat, turnIndex, turnsPerEpisode,
         engine.stances[seat], engine.haveStance[seat])))
 
@@ -169,24 +164,29 @@ proc turn*(
   for seat in 0 ..< engine.seats.len:
     if sim.laneIsOver(seat):
       # A finished lane is dropped from every later batch: there is nothing
-      # left to decide and the autopilot commands 0 regardless.
+      # left to decide and the sim receives 0 regardless.
       engine.decisions[seat].observation = newJNull()
-      var stance = engine.scriptedFor(sim, seat, blArcader)
-      stance.source = stScripted
-      engine.stances[seat] = stance
-      engine.haveStance[seat] = true
+      engine.haveStance[seat] = false
+    elif not engine.seats[seat].registered:
+      # Missing registration never silently selects a baseline.
+      engine.haveStance[seat] = false
+      result.add(fallbackRecord(turnIndex, seat, 1, "unregistered",
+        "seat never registered; missed turn (zero control byte)"))
+      result.add(missedTurnRecord(turnIndex, seat, "unregistered"))
+      echo "atari-57: seat ", seat, " unregistered; missed turn ", turnIndex,
+        " (zero control byte)"
     elif engine.seats[seat].isLlm and not engine.llmOff and
         not engine.batch.isNil:
       open.add(seat)
     elif engine.seats[seat].isLlm:
-      # An LLM seat that CANNOT call the LLM this turn executes a neutral hold
-      # rather than a scripted `arcader` policy.
-      engine.stances[seat] = holdFallbackStance()
-      engine.haveStance[seat] = true
+      # An LLM seat that CANNOT call the LLM this turn misses the turn
+      # (zero physical control byte; no synthesized stance).
+      engine.haveStance[seat] = false
       let cause = if engine.llmOff: "budget_guard" else: "transport_error"
       result.add(fallbackRecord(turnIndex, seat, 1, cause,
-        "the LLM is unavailable for this turn; holding neutral stance"))
-      echo "atari-57 llm: seat ", seat, " falling back to neutral hold (", cause,
+        "the LLM is unavailable for this turn; missed turn (zero control byte)"))
+      result.add(missedTurnRecord(turnIndex, seat, cause))
+      echo "atari-57 llm: seat ", seat, " missed turn (", cause,
         ") on turn ", turnIndex
     else:
       var stance = engine.scriptedFor(sim, seat, engine.seats[seat].baseline)
@@ -260,13 +260,10 @@ proc turn*(
         if not reply.ok:
           cause = if reply.cause.len > 0: reply.cause else: "transport_error"
           raise newException(ValueError, reply.error)
-        var stance = parseLaneStance(
-          parseJson(reply.action), engine.stances[seat],
-          engine.haveStance[seat])
+        var stance = parseLaneStance(parseJson(reply.action))
         let proposal = stance.actionJson()
         if evidence.origin == aoModel:
-          let independentlyParsed = parseLaneStance(extractJsonObject(evidence.response.getStr()),
-            engine.stances[seat], engine.haveStance[seat])
+          let independentlyParsed = parseLaneStance(extractJsonObject(evidence.response.getStr()))
           evidence.parsedAction = independentlyParsed.actionJson()
           if evidence.parsedAction != proposal:
             raise newException(ValueError, "model response differs from submitted stance")
@@ -274,16 +271,12 @@ proc turn*(
           evidence.parsedAction = proposal
         stance.source = stLlm
         stance.latencyMs = latency
-        engine.repairMissingFields(sim, seat, stance)
-        if evidence.parsedAction == stance.actionJson():
-          evidence.accepted = true
-          engine.decisions[seat].selectedAttemptId = some(evidence.attemptId)
-          engine.decisions[seat].status = asAccepted
-        else:
-          stance.source = stFallback
-          evidence.rejectionReason = some("engine repaired parsed stance")
+        evidence.accepted = true
+        engine.decisions[seat].selectedAttemptId = some(evidence.attemptId)
+        engine.decisions[seat].status = asAccepted
         engine.stances[seat] = stance
         engine.haveStance[seat] = true
+        inc engine.acceptedLlmTurns[seat]
       except CatchableError as error:
         result.add(fallbackRecord(turnIndex, seat, attempt + 1, cause,
                                   cause))
@@ -298,37 +291,46 @@ proc turn*(
     inc attempt
     var retryable: seq[int]
     for seat in open:
-      if lastCause[seat] in ["throttled", "no_endpoint"]:
+      if lastCause[seat] in ["throttled", "no_endpoint", "auth_error"]:
         failFast.add(seat)
       else:
         retryable.add(seat)
     open = retryable
 
-  # --- anything still open holds a neutral stance (never scripted arcader) -
+  # --- anything still open misses the turn (zero control byte, no stance) --
   open.add(failFast)
   for seat in open:
-    engine.stances[seat] = holdFallbackStance()
-    engine.haveStance[seat] = true
+    engine.haveStance[seat] = false
     let cause = if lastCause[seat].len > 0: lastCause[seat] else: "timeout"
+    if cause in ["no_endpoint", "auth_error"]:
+      inc engine.infraFailures[seat]
+      if not engine.infraFault:
+        engine.infraFault = true
+        engine.infraFaultSeat = seat
+        engine.infraFaultCause = cause
+    elif cause in ["transport_error", "throttled", "timeout"]:
+      inc engine.infraFailures[seat]
     result.add(fallbackRecord(turnIndex, seat, 2, cause,
-      "seat fell back to neutral hold"))
-    ## "falling back" is the phrase phase 60 greps the GAME log for.
-    echo "atari-57 llm: seat ", seat, " falling back to neutral hold (", cause,
+      "missed turn; zero control byte (0)"))
+    result.add(missedTurnRecord(turnIndex, seat, cause))
+    echo "atari-57 llm: seat ", seat, " missed turn (", cause,
       ") on turn ", turnIndex
 
   for seat in 0 ..< engine.seats.len:
+    if not engine.haveStance[seat]:
+      engine.decisions[seat].executedAction = newJNull()
+      continue
     let action = engine.stances[seat].actionJson()
     engine.decisions[seat].executedAction = action
-    if engine.stances[seat].source == stScripted and not sim.laneIsOver(seat):
-      let intentional = engine.seats[seat].registered
+    if engine.stances[seat].source == stScripted and engine.seats[seat].registered and
+        not sim.laneIsOver(seat):
       var teacher = newDecisionAttempt($turnIndex & "-" & $seat & "-teacher",
-        "scripted-" & $engine.seats[seat].baseline, if intentional: aoTeacher else: aoFallback)
+        "scripted-" & $engine.seats[seat].baseline, aoTeacher)
       teacher.prompt = %*[{"role": "system", "content": selection.systemPrompt()},
         {"role": "user", "content": $engine.decisions[seat].observation}]
       teacher.parsedAction = action
       teacher.response = %($action)
-      teacher.accepted = intentional
+      teacher.accepted = true
       engine.decisions[seat].attempts.add(teacher)
-      if intentional:
-        engine.decisions[seat].selectedAttemptId = some(teacher.attemptId)
-        engine.decisions[seat].status = asAccepted
+      engine.decisions[seat].selectedAttemptId = some(teacher.attemptId)
+      engine.decisions[seat].status = asAccepted

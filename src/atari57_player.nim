@@ -49,21 +49,21 @@ when isMainModule:
     prompt = getEnv("PLAYER_PROMPT").strip()
     scripted = getEnv("PLAYER_SCRIPTED").strip()
     endpoint = getEnv("COWORLD_LLM_ENDPOINT").strip()
+    llmEnabled = getEnv("COWORLD_LLM_ENABLED").strip().toLowerAscii() in ["1", "true", "yes"]
     kind =
       if numericUrl.len > 0: "external"
       elif scripted.len > 0: "scripted"
-      elif prompt.len > 0 or endpoint.len > 0: "prompt"
-      else: "scripted"
+      elif llmEnabled or prompt.len > 0 or endpoint.len > 0: "prompt"
+      else: "prompt"
     label = block:
       let explicit = getEnv("PLAYER_POLICY_LABEL").strip()
       if explicit.len > 0: explicit
       elif numericUrl.len > 0: "numeric"
       elif kind == "prompt": "prompt"
-      elif scripted.len > 0: scripted
-      else: "arcader"
+      else: scripted
   echo "atari-57 player: kind=",
     kind,
-    " baseline=", (if scripted.len > 0: scripted else: "arcader"),
+    " baseline=", (if kind == "scripted": scripted else: "none"),
     " label=", label
   let client = if kind == "prompt": newLlmClient(defaultGameConfig()) else: nil
 
@@ -136,8 +136,9 @@ when isMainModule:
               let response = parseJson(numericClient.postContent(numericUrl, $request))
               reply["action"] = candidateStance(view, response["choice"].getInt())
             elif kind == "prompt" and client.disabled:
-              reply["cause"] = %"no_endpoint"
-              reply["error"] = %"no_endpoint"
+              let cause = if client.authFailed: "auth_error" else: "no_endpoint"
+              reply["cause"] = %cause
+              reply["error"] = %cause
             else:
               try:
                 var user = userMessage(prompt, $decision["view"])
@@ -163,9 +164,14 @@ when isMainModule:
                 evidence.completionEvidence(parseJson(response.body))
                 evidence.response = %text
                 reply["action"] = extractJsonObject(text)
+              except StanceError, JsonParsingError:
+                reply["cause"] = %"parse_error"
+                reply["error"] = %"parse_error"
               except CatchableError as error:
-                reply["cause"] = %(if client != nil and client.throttled:
-                    "throttled" else: "transport_error")
+                reply["cause"] = %(
+                  if client != nil and client.authFailed: "auth_error"
+                  elif client != nil and client.throttled: "throttled"
+                  else: "transport_error")
                 reply["error"] = reply["cause"]
             reply["training_attempt"] = attemptEvidenceJson(evidence)
             socket.send($reply, TextMessage)

@@ -1,118 +1,126 @@
-## Tolerant parsing and repair: every field the schema bounds is REPAIRED, not
-## rejected, and every truncation lands on a RUNE boundary.
+## Strict canonical stance parsing: raw JSON or standard outer Markdown JSON
+## fence, only `mode` required, fixed documented defaults for omitted optionals,
+## no synonyms or silent repairs, and every free-text truncation lands on a RUNE
+## boundary.
 
 import std/[json, strformat, strutils, unicode]
 import lane_helpers
 import lane/[sim_types, stances]
 
-proc parsed(text: string, previous = DefaultStance, have = false): LaneStance =
-  parseLaneStance(extractJsonObject(text), previous, have)
+proc parsed(text: string): LaneStance =
+  parseLaneStance(extractJsonObject(text))
 
-proc testProsePrefixed() =
-  let stance = parsed(
-    "Sure! Here is my plan for the next five seconds.\n\n" &
-    "```json\n{\"mode\": \"hunt\", \"zone\": \"sw\", \"risk\": 0.55}\n```\n" &
-    "Let me know if you want a different one.")
-  check(stance.mode == mdHunt, "a fenced, prose-wrapped reply did not parse")
-  check(stance.zone == znSw, "the zone was lost")
-  check(stance.riskMilli == 550, &"risk parsed as {stance.riskMilli}")
-  report("prose-prefixed and fenced JSON parse")
+proc assertRejected(text: string, label: string) =
+  var raised = false
+  try:
+    discard parsed(text)
+  except StanceError, JsonParsingError:
+    raised = true
+  check(raised, &"expected rejection for {label}, but reply was accepted")
 
-proc testPercentageRisk() =
-  check(parsed("""{"mode":"clear","risk":55}""").riskMilli == 550,
-        "an integer percentage risk was not divided by 100")
-  check(parsed("""{"mode":"clear","risk":"0.25"}""").riskMilli == 250,
-        "a numeric string risk did not parse")
-  check(parsed("""{"mode":"clear","risk":"85%"}""").riskMilli == 850,
-        "a percent-suffixed risk did not parse")
-  check(parsed("""{"mode":"clear","risk":9.9}""").riskMilli == 99,
-        "a value above 1 was not read as a percentage")
-  check(parsed("""{"mode":"clear","risk":140}""").riskMilli == 1000,
-        "a percentage above 100 was not clamped to 1.0")
-  check(parsed("""{"mode":"clear","risk":-3}""").riskMilli == 0,
-        "a negative risk was not clamped to 0")
-  report("risk: fractions, strings, percentages and out-of-range values")
+proc testMinimalAndMarkdownFence() =
+  let minimal = parsed("""{"mode":"hunt"}""")
+  check(minimal.mode == mdHunt and minimal.zone == znNone and
+        minimal.riskMilli == 500 and minimal.leadTicks == 14 and
+        minimal.fire == fmAuto and minimal.note == "" and minimal.say == "",
+        "minimal mode-only stance did not receive fixed defaults")
+  let fencedMinimal = parsed("```json\n{\"mode\":\"strike\"}\n```")
+  check(fencedMinimal.mode == mdStrike and fencedMinimal.zone == znNone and
+        fencedMinimal.riskMilli == 500 and fencedMinimal.leadTicks == 14 and
+        fencedMinimal.fire == fmAuto,
+        "fenced minimal stance did not parse with fixed defaults")
+  let bareFence = parsed("```\n{\"mode\":\"bank\",\"zone\":\"sw\",\"risk\":0.2,\"lead_ticks\":8}\n```")
+  check(bareFence.mode == mdBank and bareFence.zone == znSw and
+        bareFence.riskMilli == 200 and bareFence.leadTicks == 8,
+        "standard outer ``` fence did not parse")
+  let full = parsed("""{"note":"power pellet in sw","mode":"hunt","zone":"sw","risk":0.55,"lead_ticks":16,"fire":"hold","say":"going sw"}""")
+  check(full.mode == mdHunt and full.zone == znSw and full.riskMilli == 550 and
+        full.leadTicks == 16 and full.fire == fmHold and full.say == "going sw",
+        "full canonical JSON did not parse")
+  report("minimal mode-only JSON, full JSON, and outer Markdown JSON fence parse")
 
-proc testModeSynonyms() =
-  for (text, want) in [("greedy", mdClear), ("collect", mdClear),
-                       ("attack", mdStrike), ("chase", mdHunt),
-                       ("defend", mdSafe), ("dodge", mdSafe),
-                       ("survive", mdBank), ("turtle", mdBank),
-                       ("  STRIKE  ", mdStrike), ("Bank", mdBank)]:
-    let stance = parsed(&"""{{"mode":"{text}"}}""")
-    check(stance.mode == want, &"mode `{text}` parsed as {stance.mode}")
-  report("mode synonyms, case and whitespace")
+proc testProseAndMalformedRejected() =
+  assertRejected(
+    "Sure! Here is my plan.\n```json\n{\"mode\":\"hunt\"}\n```",
+    "prose-prefixed fenced JSON")
+  assertRejected(
+    "{\"mode\":\"hunt\"}\nHope that helps!",
+    "prose-suffixed JSON")
+  assertRejected("I would rather not say.", "plain prose")
+  assertRejected("[]", "JSON array")
+  assertRejected("""{"weather":"fine"}""", "object without mode")
+  assertRejected("""{"note":"only a note"}""", "note-only object")
+  assertRejected("""{"zone":"sw","risk":0.5,"lead_ticks":12}""", "missing required mode")
+  report("prose-wrapped, malformed, and mode-less replies are rejected")
 
-proc testZoneSynonyms() =
-  for (text, want) in [("north-west", znNw), ("top left", znNw),
-                       ("upper left", znNw), ("north east", znNe),
-                       ("bottom right", znSe), ("lower left", znSw),
-                       ("middle", znCentre), ("anywhere", znNone),
-                       ("", znNone), ("nowhere-at-all", znNone)]:
-    let stance = parsed(&"""{{"mode":"clear","zone":"{text}"}}""")
-    check(stance.zone == want, &"zone `{text}` parsed as {stance.zone}")
-  report("zone synonyms and the unknown-zone repair")
+proc testRiskValidation() =
+  check(parsed("""{"mode":"clear","risk":0}""").riskMilli == 0, "risk 0 failed")
+  check(parsed("""{"mode":"clear","risk":1}""").riskMilli == 1000, "risk 1 failed")
+  check(parsed("""{"mode":"clear","risk":0.25}""").riskMilli == 250, "risk 0.25 failed")
+  for bad in ["55", "\"0.25\"", "\"85%\"", "9.9", "140", "-0.1", "null", "true"]:
+    assertRejected(&"""{{"mode":"clear","risk":{bad}}}""", &"risk={bad}")
+  report("risk accepts only JSON numbers in [0, 1]; percentages/strings/out-of-range rejected")
 
-proc testFireSynonyms() =
-  for (text, want) in [("always", fmAuto), ("off", fmNever), ("on", fmAuto),
-                       ("hold", fmHold), ("nonsense", fmAuto)]:
-    let stance = parsed(&"""{{"mode":"clear","fire":"{text}"}}""")
-    check(stance.fire == want, &"fire `{text}` parsed as {stance.fire}")
-  report("fire synonyms and the unknown-fire repair")
+proc testModeAliasesRejected() =
+  for canonical in ["clear", "hunt", "strike", "safe", "bank"]:
+    let stance = parsed(&"""{{"mode":"{canonical}"}}""")
+    check($stance.mode == canonical, &"canonical mode {canonical} failed")
+  for bad in ["greedy", "collect", "attack", "chase", "defend", "dodge",
+              "survive", "turtle", "STRIKE", "Bank", "  clear  ", "teleport"]:
+    assertRejected(&"""{{"mode":"{bad}"}}""", &"mode={bad}")
+  report("canonical modes accepted; synonyms, case variants and unknown modes rejected")
 
-proc testUnknownModeKeepsLastTurn() =
-  var previous = DefaultStance
-  previous.mode = mdStrike
-  previous.riskMilli = 900
-  let stance = parsed("""{"mode":"teleport","zone":"ne"}""", previous, true)
-  check(stance.mode == mdStrike,
-        "an unrecognised mode did not keep last turn's value")
-  let fresh = parsed("""{"mode":"teleport","zone":"ne"}""")
-  check(fresh.mode == mdClear,
-        "an unrecognised mode with no history did not fall to clear")
-  report("an unknown mode keeps last turn's, else clear")
+proc testZoneAliasesRejected() =
+  for canonical in ["none", "nw", "ne", "sw", "se", "centre", "left", "right", "top", "bottom"]:
+    let stance = parsed(&"""{{"mode":"clear","zone":"{canonical}"}}""")
+    check($stance.zone == canonical, &"canonical zone {canonical} failed")
+  for bad in ["north-west", "top left", "upper left", "north east",
+              "bottom right", "lower left", "middle", "center", "anywhere",
+              "", "nowhere-at-all", "NW"]:
+    assertRejected(&"""{{"mode":"clear","zone":"{bad}"}}""", &"zone={bad}")
+  assertRejected("""{"mode":"clear","zone":null}""", "zone=null")
+  report("canonical zones accepted; synonyms and unknown zones rejected")
 
-proc testLeadTicksClamp() =
-  check(parsed("""{"mode":"clear","lead_ticks":-5}""").leadTicks == 0,
-        "lead_ticks -5 was not clamped to 0")
-  check(parsed("""{"mode":"clear","lead_ticks":999}""").leadTicks == 48,
-        "lead_ticks 999 was not clamped to 48")
-  check(parsed("""{"mode":"clear","lead_ticks":"16"}""").leadTicks == 16,
-        "a numeric-string lead_ticks did not parse")
-  check(parsed("""{"mode":"clear","lead_ticks":null}""").leadTicks == 14,
-        "a null lead_ticks did not repair to 14")
-  report("lead_ticks: clamped to [0, 48], null repairs to 14")
+proc testFireAliasesRejected() =
+  for canonical in ["auto", "hold", "never"]:
+    let stance = parsed(&"""{{"mode":"clear","fire":"{canonical}"}}""")
+    check($stance.fire == canonical, &"canonical fire {canonical} failed")
+  for bad in ["always", "off", "on", "AUTO", "nonsense"]:
+    assertRejected(&"""{{"mode":"clear","fire":"{bad}"}}""", &"fire={bad}")
+  assertRejected("""{"mode":"clear","fire":null}""", "fire=null")
+  report("canonical fire modes accepted; synonyms and unknown fire modes rejected")
+
+proc testLeadTicksValidation() =
+  check(parsed("""{"mode":"clear","lead_ticks":0}""").leadTicks == 0, "lead_ticks 0 failed")
+  check(parsed("""{"mode":"clear","lead_ticks":48}""").leadTicks == 48, "lead_ticks 48 failed")
+  for bad in ["-5", "49", "999", "\"16\"", "16.5", "null"]:
+    assertRejected(&"""{{"mode":"clear","lead_ticks":{bad}}}""", &"lead_ticks={bad}")
+  # camelCase alias is ignored/not accepted as lead_ticks; verify lead_ticks stays fixed default or wait:
+  # reject non-canonical leadTicks? No extra gates, or verify leadTicks is NOT applied.
+  check(parsed("""{"mode":"clear","leadTicks":48}""").leadTicks == 14,
+        "camelCase leadTicks alias must not override lead_ticks")
+  report("lead_ticks accepts only integers in 0..48; invalid supplied values rejected")
 
 proc testNoteAndSayCaps() =
   let long = "x".repeat(300)
   let stance = parsed(&"""{{"mode":"clear","note":"{long}"}}""")
   check(stance.note.runeLen == MaxNoteRunes,
         &"a 300-char note came out {stance.note.runeLen} runes")
-  report("a 300-character note is cut to exactly 160 runes")
+  assertRejected("""{"mode":"clear","note":123}""", "non-string note")
+  assertRejected("""{"mode":"clear","say":123}""", "non-string say")
+  report("a 300-character note is cut to exactly 160 runes; non-string note/say rejected")
 
 proc testEmojiOnTheBoundary() =
-  ## THE RUNE RULE. A 4-byte emoji sitting on the 48-rune boundary must be cut
-  ## on the RUNE boundary: a byte-truncated codepoint renders in a browser and
-  ## then fails a strict UTF-8 parser, which is the bug that makes a replay
-  ## unreadable to everything except the one lenient viewer.
-  let say = "a".repeat(47) & "\u{1F600}\u{1F600}"    ## 47 + two 4-byte emoji
+  let say = "a".repeat(47) & "\u{1F600}\u{1F600}"
   check(say.runeLen == 49, "the fixture say is not 49 runes")
-  var node = newJObject()
-  node["mode"] = %"clear"
-  node["say"] = %say
-  let stance = parseLaneStance(node, DefaultStance, false)
-  # sanitizeSay caps at 48 runes FIRST and then strips non-printable-ASCII, so
-  # the emoji goes entirely — it is never left as a half codepoint.
+  let stance = parseLaneStance(%*{"mode": "clear", "say": say})
   check(stance.say.runeLen <= MaxSayRunes,
         &"say is {stance.say.runeLen} runes, over the cap")
   check(stance.say.validateUtf8() == -1, "say is not valid UTF-8")
-  # And the raw truncation on its own lands on the boundary too.
   let cut = truncateRunes(say, 48)
   check(cut.runeLen == 48, &"truncateRunes gave {cut.runeLen} runes")
   check(cut.validateUtf8() == -1, "truncateRunes split a codepoint")
   check(cut.endsWith("\u{1F600}"), "truncateRunes dropped the boundary rune")
-  # The whole record must round-trip through %$ -> parseJson and decode as
-  # UTF-8, which is exactly what the replay reader does.
   var emojiStance = stance
   emojiStance.note = "\u{1F600}".repeat(200)
   emojiStance.note = truncateRunes(emojiStance.note, MaxNoteRunes)
@@ -124,24 +132,6 @@ proc testEmojiOnTheBoundary() =
   check(reparsed{"k"}.getStr() == "stance", "the record did not round-trip")
   report("a 4-byte emoji on the boundary: rune-cut, valid UTF-8, round-trips")
 
-proc testNoUsableFieldRaises() =
-  ## The ONE condition the retry and then the fallback exist for.
-  var raised = false
-  try:
-    discard parsed("""{"weather":"fine"}""")
-  except StanceError:
-    raised = true
-  check(raised, "a reply with no usable field did not raise")
-  raised = false
-  try:
-    discard parsed("I would rather not say.")
-  except StanceError:
-    raised = true
-  except JsonParsingError:
-    raised = true
-  check(raised, "a reply with no JSON object at all did not raise")
-  report("a reply with nothing usable raises, so the retry can fire")
-
 proc testRecordCaps() =
   let long = "n".repeat(400)
   var stance = DefaultStance
@@ -152,25 +142,24 @@ proc testRecordCaps() =
         &"an over-long stance record is {record.runeLen} runes")
   check(parseJson(record){"k"}.getStr() == "stance",
         "the shrunk record is not valid JSON")
-  let reg = registerRecord(0, 0, "RED", "p".repeat(200), "llm", "arcader")
+  let reg = registerRecord(0, 0, "RED", "p".repeat(200), "llm", "none")
   check(parseJson(reg){"policy"}.getStr().runeLen == MaxPolicyLabelRunes,
         "the policy label was not capped at 48 runes")
   let fb = fallbackRecord(3, 1, 2, "timeout", "d".repeat(500))
   check(parseJson(fb){"detail"}.getStr().runeLen == MaxFallbackDetailRunes,
         "the fallback detail was not capped at 200 runes")
-  report("register.policy ≤ 48, fallback.detail ≤ 200, stance ≤ 600 runes")
+  report("register.policy <= 48, fallback.detail <= 200, stance <= 600 runes")
 
 when isMainModule:
   echo "test_stances"
-  testProsePrefixed()
-  testPercentageRisk()
-  testModeSynonyms()
-  testZoneSynonyms()
-  testFireSynonyms()
-  testUnknownModeKeepsLastTurn()
-  testLeadTicksClamp()
+  testMinimalAndMarkdownFence()
+  testProseAndMalformedRejected()
+  testRiskValidation()
+  testModeAliasesRejected()
+  testZoneAliasesRejected()
+  testFireAliasesRejected()
+  testLeadTicksValidation()
   testNoteAndSayCaps()
   testEmojiOnTheBoundary()
-  testNoUsableFieldRaises()
   testRecordCaps()
   echo "test_stances OK"

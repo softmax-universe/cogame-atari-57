@@ -304,9 +304,9 @@ proc laneCommand*(
   tick: int
 ): uint8 =
   ## The one action byte for one lane on one tick. `0` whenever the lane is
-  ## not `Playing`, so a dying, respawning or finished lane is never
-  ## commanded.
-  if lane.phase != lpPlaying:
+  ## not `Playing` or the turn fell back (`stFallback`), so a dying,
+  ## respawning, finished, or failed-LLM lane is never driven by autopilot.
+  if lane.phase != lpPlaying or stance.source == stFallback:
     return 0'u8
   let
     field = threatField(lane, preset)

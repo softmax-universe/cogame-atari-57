@@ -62,6 +62,7 @@ proc currentDecision(): JsonNode =
         "lead_ticks": {"type": "integer", "minimum": 0, "maximum": 48},
         "fire": {"enum": ["auto", "hold", "never"]},
       },
+      "required": ["mode"],
     },
   }
   if not numericMode:
@@ -123,8 +124,7 @@ proc step(command: JsonNode): JsonNode =
     reply =
       if numericMode: candidateStance(parseJson(currentDecision()["messages"][1]["content"].getStr()), submitted["choice"].getInt())
       else: submitted
-    stance = parseLaneStance(reply,
-      chosenStances[actingSeat], haveStance[actingSeat])
+    stance = parseLaneStance(reply)
   except JsonParsingError, StanceError:
     return %*{"kind": "rejected", "reason": "reply must be a usable JSON stance"}
   chosenStances[actingSeat] = stance

@@ -826,11 +826,19 @@ proc runServerLoop*(
             let registration = parseRegistration(chatText)
             if not registration.ok:
               continue                 ## seats do not chat; lanes do not talk.
+            if registration.kind notin ["prompt", "external", "scripted"]:
+              echo "ERROR: seat ", playerIndex, " sent unknown registration kind: ", registration.kind
+              continue
+            if registration.kind == "scripted" and
+                registration.scripted notin ["arcader", "hoover"]:
+              echo "ERROR: seat ", playerIndex, " sent unknown scripted baseline: ", registration.scripted
+              continue
             var policy = engine.seats[playerIndex]
             let firstRegistration = not policy.registered
             policy.registered = true
             policy.isLlm = registration.kind in ["prompt", "external"]
-            policy.baseline = parseBaseline(registration.scripted)
+            if not policy.isLlm:
+              policy.baseline = parseBaseline(registration.scripted)
             policy.label =
               if registration.policy.len > 0: registration.policy
               elif policy.isLlm: "prompt"
@@ -838,14 +846,15 @@ proc runServerLoop*(
             engine.seats[playerIndex] = policy
             game.seatPolicyKind[playerIndex] = engine.policyKind(playerIndex)
             if firstRegistration:
+              let baselineName = if policy.isLlm: "none" else: $policy.baseline
               replayWriter.writeChat(
                 tickTime(game.tickCount), playerIndex,
                 registerRecord(
                   playerIndex, playerIndex, laneAlias(playerIndex),
                   policy.label, engine.policyKind(playerIndex),
-                  $policy.baseline))
+                  baselineName))
               echo "seat ", playerIndex, " registered: kind=",
-                engine.policyKind(playerIndex), " baseline=", $policy.baseline
+                engine.policyKind(playerIndex), " baseline=", baselineName
           appState.chatMessages.clear()
           for (websocket, chatText) in held:
             appState.chatMessages[websocket] = chatText
@@ -875,11 +884,10 @@ proc runServerLoop*(
           loggedMissingRegister = true
           for seat in 0 ..< config.numAgents:
             if not engine.seats[seat].registered:
-              ## EDIT 6: loudly, at the first turn. A silently-lost register
-              ## packet is otherwise indistinguishable from an LLM that chose
-              ## badly (grf-football round 2, 2026-08-27).
-              echo "ERROR: SEAT ", seat, " NEVER REGISTERED — playing arcader"
-              game.seatPolicyKind[seat] = "scripted"
+              ## EDIT 6: loudly, at the first turn. Missing registration never
+              ## silently selects a scripted baseline.
+              echo "ERROR: SEAT ", seat, " NEVER REGISTERED — emitting zero control byte (0)"
+              game.seatPolicyKind[seat] = "llm"
         engine.batch = playerBatch(seatSockets, seatConnected, selection)
         let records = engine.turn(
           game, turnIndex, config.turnsPerEpisode(), elapsedSeconds, selection)
@@ -899,9 +907,13 @@ proc runServerLoop*(
             detail = $engine.stances[seat].source,
             content = engine.stances[seat].note)
       for seat in 0 ..< 4:
-        cmds[seat] = laneCommand(
-          controls[seat], game.lanes[seat], engine.stances[seat],
-          config.preset, game.tickCount)
+        cmds[seat] =
+          if engine.haveStance[seat]:
+            laneCommand(
+              controls[seat], game.lanes[seat], engine.stances[seat],
+              config.preset, game.tickCount)
+          else:
+            0'u8
         ## EDIT 2: the codec's own change-only guard is the whole action log.
         replayWriter.writeInputMaskChange(
           tickTime(game.tickCount), seat, cmds[seat])

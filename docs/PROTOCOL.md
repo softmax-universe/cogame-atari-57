@@ -11,9 +11,11 @@ A seat registers, acknowledges frames, and answers decision requests.
 1. REGISTRATION. One Sprite v1 chat frame (0x81), a JSON object:
      {"type":"register","kind":"prompt"|"external"|"scripted",
       "scripted":"arcader"|"hoover"|null,"policy":"<free label>"}
-   `prompt` or `external` makes the seat a model policy; `scripted` names a published
-   baseline; a seat that sets neither is `arcader`, and the server LOGS THAT
-   LOUDLY. The registration is re-sent for the first ~10 s of frames because a
+   `prompt` or `external` makes the seat a model policy; `scripted` names an
+   explicitly chosen published baseline (`arcader` or `hoover`). Missing
+   registration never silently selects a baseline — an unregistered seat misses
+   its turns and emits a zero physical control byte (`0`), and the server LOGS
+   THAT LOUDLY. The registration is re-sent for the first ~10 s of frames because a
    seat's slot may not be admissible yet; the server holds an unappliable
    registration rather than dropping it. The player keeps its prompt private;
    neither the replay nor the results contains it.
@@ -53,9 +55,11 @@ rival's {alias, score, lives, screen} and nothing else. The reply is:
    "risk":0.0..1.0,"lead_ticks":0..48,
    "fire":"auto|hold|never","say":"<=48 runes"}
 
-Parsing is tolerant (markdown fences, prose prefixes, percentages, synonyms);
-every field is repaired rather than rejected; two consecutive failures fall
-back to the published `arcader` stance and write a `fallback` record.
+Parsing is strict against the canonical JSON schema (only `mode` is required;
+omitted optional fields use fixed defaults; an outer Markdown JSON fence is
+accepted). Invalid or unavailable model replies receive one retry and then
+record a missed turn (`fallback` + `missed_turn`) with no synthesized stance
+and a zero physical control byte (`0`).
 
 ## THE SPECTATOR SOCKET (ws://<game>/global) AND THE REPLAY BYTES
 

@@ -1,8 +1,9 @@
 ## Game-owned decisions over one bounded batch of ordinary player responses.
 
 import std/[json, monotimes, os, sequtils, strformat, times]
+import bitworld/decision_trajectory
 import lane_helpers
-import lane/[sim_types, decide, stances]
+import lane/[sim_types, decide, stances, control]
 
 const GoodAction = """{"mode":"hunt","zone":"sw","risk":0.55,
   "lead_ticks":16,"note":"take the power pellet","say":"going for it"}"""
@@ -72,8 +73,8 @@ proc testOverLanesAreDropped() =
   discard engine.turn(game, 1, 24, 0)
   check(batchCalls.len == 1 and batchCalls[0].len == 2,
     "finished lanes reached the player batch")
-  check(engine.stances[1].source == stScripted,
-    "a finished lane still used an external stance")
+  check(not engine.haveStance[1],
+    "a finished lane still installed a stance")
   report("finished lanes are omitted")
 
 proc testInterBatchFloor() =
@@ -103,10 +104,12 @@ proc testPerTurnBudgetWithAHungClient() =
   check((getMonoTime() - started).inMilliseconds < 3500,
     "a player timeout exceeded the turn budget")
   for seat in 0 ..< 4:
-    check(engine.stances[seat].source == stFallback,
-      "a timed-out player did not fall back")
+    check(not engine.haveStance[seat] and
+      engine.decisions[seat].status == asMissing and
+      engine.decisions[seat].executedAction.kind == JNull,
+      "a timed-out player synthesized a stance instead of missing the turn")
   check(records.len >= 4, "fallback records were missing")
-  report("bounded player timeouts fall back")
+  report("bounded player timeouts record missed turns with no synthesized stance")
 
 proc testThrottleSkipsTheRetry() =
   resetFake("throttled")
@@ -130,12 +133,30 @@ proc testRetryOnceThenFallBack() =
   check(batchCalls.len == 2 and batchCalls[1].len == 4,
     "unusable replies did not receive exactly one retry")
   for seat in 0 ..< 4:
-    check(engine.stances[seat].source == stFallback and
-      engine.stances[seat].fire == fmNever and
-      engine.stances[seat].riskMilli == 0,
-      "an unusable reply did not fall back to neutral hold")
+    check(not engine.haveStance[seat] and
+      engine.decisions[seat].status == asMissing and
+      engine.decisions[seat].executedAction.kind == JNull,
+      "an unusable reply synthesized a stance instead of missing the turn")
+  check(records.anyIt(parseJson(it){"k"}.getStr() == "missed_turn"),
+    "missed_turn record was missing")
   check(records.len >= 8, "attempt records were missing")
-  report("one retry then game-owned fallback")
+  report("one retry then missed turn (no synthesized stance, zero control byte)")
+
+proc testUnregisteredSeatDoesNotPlayBaseline() =
+  var config = testConfig(RomChomper, 5_140_913)
+  config.turnSpacingMs = 0
+  var game = seatedSim(config)
+  var engine = initDecisionEngine(game)
+  let records = engine.turn(game, 0, 24, 0)
+  for seat in 0 ..< 4:
+    check(not engine.haveStance[seat] and
+      engine.decisions[seat].status == asMissing and
+      engine.decisions[seat].executedAction.kind == JNull,
+      "an unregistered seat silently played a baseline")
+  check(records.anyIt(parseJson(it){"k"}.getStr() == "missed_turn" and
+    parseJson(it){"cause"}.getStr() == "unregistered"),
+    "unregistered missed_turn record was missing")
+  report("missing registration never silently selects a baseline")
 
 proc testBudgetGuard() =
   resetFake("good")
@@ -212,6 +233,7 @@ when isMainModule:
   testPerTurnBudgetWithAHungClient()
   testThrottleSkipsTheRetry()
   testRetryOnceThenFallBack()
+  testUnregisteredSeatDoesNotPlayBaseline()
   testBudgetGuard()
   testNoCredentialsFallsBackInstantly()
   testMinTicksHoldsTheEpisodeOpen()

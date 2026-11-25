@@ -1,12 +1,5 @@
-## The stance schema: what a policy (LLM or scripted) may say, how a reply is
-## parsed TOLERANTLY, and how an illegal reply is REPAIRED rather than
-## rejected.
-##
-## This is `coworld-ctf`'s `src/ctf/directives.nim`, same file shape and same
-## discipline, retargeted from a squad directive to one lane stance:
-## `truncateRunes` / `sanitizeSay` / `sanitizeNote` / `extractJsonObject` are
-## carried over behaviour for behaviour, because every one of them is scar
-## tissue from a real hosted failure.
+## The stance schema: what a policy (LLM or scripted) may say, and how a reply
+## is parsed strictly against the canonical JSON contract.
 ##
 ## RUNE DISCIPLINE. Every cap here is measured in RUNES (Unicode codepoints)
 ## and every truncation lands on a rune boundary (`runeLen` / `runeSubStr`).
@@ -104,172 +97,127 @@ proc sanitizeNote*(text: string): string =
   ## Newlines collapse to spaces so one record stays one line.
   text.replace("\n", " ").replace("\r", " ").strip().truncateRunes(MaxNoteRunes)
 
-proc parseMode*(text: string, fallback: Mode): tuple[ok: bool, mode: Mode] =
-  ## Case-insensitive, whitespace-tolerant, with the design note's synonym
-  ## table. Anything still unknown reports `ok = false` so the caller can keep
-  ## last turn's value rather than inventing one.
-  let key = text.strip().toLowerAscii().truncateRunes(MaxModeRunes)
+proc parseMode*(text: string): Mode =
+  ## Exact canonical mode string; rejects synonyms and unknown values.
   for mode in Mode:
-    if $mode == key:
-      return (true, mode)
-  case key
-  of "greedy", "collect", "gather", "farm": (true, mdClear)
-  of "attack", "cash", "cash_in": (true, mdStrike)
-  of "chase", "seek": (true, mdHunt)
-  of "defend", "dodge", "evade": (true, mdSafe)
-  of "survive", "turtle", "hold": (true, mdBank)
-  else: (false, fallback)
+    if $mode == text:
+      return mode
+  raise newException(StanceError, "invalid mode: " & text)
 
 proc parseZone*(text: string): Zone =
-  ## The nine zones plus `none`, accepting the shapes models really emit:
-  ## `"north-west"`, `"top left"`, `"upper left"`, `"middle"`, `"anywhere"`.
-  let key = text.strip().toLowerAscii().replace("-", " ").replace("_", " ")
+  ## Exact canonical zone string; rejects synonyms and unknown values.
   for zone in Zone:
-    if $zone == key:
+    if $zone == text:
       return zone
-  case key
-  of "north west", "top left", "upper left", "northwest", "topleft": znNw
-  of "north east", "top right", "upper right", "northeast", "topright": znNe
-  of "south west", "bottom left", "lower left", "southwest": znSw
-  of "south east", "bottom right", "lower right", "southeast": znSe
-  of "middle", "center", "central": znCentre
-  of "west": znLeft
-  of "east": znRight
-  of "north", "up": znTop
-  of "south", "down": znBottom
-  of "anywhere", "any", "": znNone
-  else: znNone
+  raise newException(StanceError, "invalid zone: " & text)
 
 proc parseFire*(text: string): FireMode =
-  let key = text.strip().toLowerAscii().truncateRunes(MaxFireRunes)
+  ## Exact canonical fire mode string; rejects synonyms and unknown values.
   for mode in FireMode:
-    if $mode == key:
+    if $mode == text:
       return mode
-  case key
-  of "always", "on", "free", "yes": fmAuto
-  of "off", "no", "cease": fmNever
-  of "aimed", "when", "wait": fmHold
-  else: fmAuto
+  raise newException(StanceError, "invalid fire mode: " & text)
+
+proc stripOuterJsonFence(text: string): string =
+  ## Accepts a raw JSON object or a single standard outer Markdown JSON fence
+  ## (```json ... ``` or ``` ... ```), with no surrounding prose.
+  let trimmed = text.strip()
+  if not trimmed.startsWith("```"):
+    return trimmed
+  let firstNl = trimmed.find('\n')
+  if firstNl < 0 or not trimmed.endsWith("```"):
+    raise newException(StanceError, "unterminated Markdown JSON fence")
+  let lang = trimmed[3 ..< firstNl].strip().toLowerAscii()
+  if lang.len > 0 and lang != "json":
+    raise newException(StanceError, "unsupported fence language: " & lang)
+  let bodyEnd = trimmed.len - 3
+  if bodyEnd <= firstNl + 1:
+    raise newException(StanceError, "empty Markdown JSON fence")
+  trimmed[firstNl + 1 ..< bodyEnd].strip()
 
 proc extractJsonObject*(text: string): JsonNode =
-  ## The outermost balanced `{...}` in a model reply, tolerating markdown
-  ## fences and any prose the model prefixed or suffixed. Falls back to
-  ## first-brace..last-brace when the scan finds no balanced pair, which is
-  ## what recovers a reply whose braces sit inside a quoted string.
-  var
-    depth = 0
-    start = -1
-    inString = false
-    escaped = false
-  for i, ch in text:
-    if inString:
-      if escaped: escaped = false
-      elif ch == '\\': escaped = true
-      elif ch == '"': inString = false
-      continue
-    case ch
-    of '"': inString = true
-    of '{':
-      if depth == 0: start = i
-      inc depth
-    of '}':
-      if depth > 0:
-        dec depth
-        if depth == 0 and start >= 0:
-          try:
-            return parseJson(text[start .. i])
-          except CatchableError:
-            start = -1
-    else: discard
-  let
-    first = text.find('{')
-    last = text.rfind('}')
-  if first < 0 or last <= first:
-    var head = text.strip()
-    if head.runeLen > 160:
-      head = head.truncateRunes(160) & "..."
-    raise newException(
-      StanceError, "no JSON object in reply: " & head.replace("\n", " "))
-  parseJson(text[first .. last])
+  ## Parses a single JSON object, optionally wrapped in a standard outer
+  ## Markdown JSON fence. Rejects surrounding prose and non-object JSON.
+  let body = stripOuterJsonFence(text)
+  if body.len == 0:
+    raise newException(StanceError, "empty reply")
+  try:
+    result = parseJson(body)
+  except JsonParsingError as error:
+    raise newException(StanceError, "invalid JSON object in reply: " & error.msg)
+  if result.kind != JObject:
+    raise newException(StanceError, "reply must be a JSON object")
 
-proc readNumber(node: JsonNode): tuple[ok: bool, value: float] =
-  ## One numeric field: an int, a float, or a numeric string. Non-finite
-  ## values report `ok = false` so the caller applies its own repair.
-  if node.isNil:
-    return (false, 0.0)
-  case node.kind
-  of JInt: (true, float(node.getBiggestInt()))
-  of JFloat:
-    let f = node.getFloat()
-    if f != f or f > 1.0e9 or f < -1.0e9: (false, 0.0)
-    else: (true, f)
-  of JString:
-    var raw = node.getStr().strip()
-    if raw.endsWith("%"):
-      raw = raw[0 ..< raw.high]
-    try: (true, parseFloat(raw.strip()))
-    except CatchableError: (false, 0.0)
-  else: (false, 0.0)
+proc parseLaneStance*(payload: JsonNode): LaneStance =
+  ## Validates one canonical stance JSON object.
+  ## Required field: `mode`.
+  ## Optional fields take fixed documented game defaults when omitted (never
+  ## inherited from a previous turn, never guessed or corrected when invalid):
+  ## `zone`="none", `risk`=0.5, `lead_ticks`=14, `fire`="auto", `note`="", `say`="".
+  if payload.isNil or payload.kind != JObject:
+    raise newException(StanceError, "stance payload must be a JSON object")
 
-proc parseLaneStance*(
-  payload: JsonNode,
-  previous: LaneStance,
-  havePrevious: bool
-): LaneStance =
-  ## Turns one parsed reply into a legal stance, REPAIRING every field the
-  ## schema bounds rather than rejecting the reply. Raises `StanceError` only
-  ## when NO usable field can be recovered — that is the one condition the
-  ## retry and then the scripted fallback exist for.
-  result = (if havePrevious: previous else: DefaultStance)
-  result.source = stLlm
-  result.latencyMs = 0
-  result.note = ""
-  result.say = ""
-  var usable = 0
+  if not payload.hasKey("mode") or payload["mode"].kind != JString:
+    raise newException(StanceError, "missing or non-string mode")
+  let mode = parseMode(payload["mode"].getStr())
 
-  if not payload.isNil and payload.kind == JObject:
-    if payload.hasKey("note") and payload["note"].kind == JString:
-      result.note = sanitizeNote(payload["note"].getStr())
-      inc usable
-    if payload.hasKey("mode") and payload["mode"].kind == JString:
-      let parsed = parseMode(
-        payload["mode"].getStr(),
-        (if havePrevious: previous.mode else: mdClear))
-      result.mode = parsed.mode
-      if parsed.ok:
-        inc usable
-    if payload.hasKey("zone") and payload["zone"].kind == JString:
-      result.zone = parseZone(payload["zone"].getStr())
-      inc usable
-    if payload.hasKey("risk"):
-      let risk = readNumber(payload["risk"])
-      if risk.ok:
-        var value = risk.value
-        ## An integer percentage is a shape models really emit; anything
-        ## above 1 is read as a percentage and divided by 100.
-        if value > 1.0:
-          value = value / 100.0
-        result.riskMilli = int32(clamp(int(value * 1000.0 + 0.5), 0, 1000))
-        inc usable
-    if payload.hasKey("lead_ticks") or payload.hasKey("leadTicks"):
-      let node =
-        if payload.hasKey("lead_ticks"): payload["lead_ticks"]
-        else: payload["leadTicks"]
-      let lead = readNumber(node)
-      if lead.ok:
-        result.leadTicks = int32(clamp(int(lead.value + 0.5), 0, 48))
-        inc usable
+  var zone = znNone
+  if payload.hasKey("zone"):
+    if payload["zone"].kind != JString:
+      raise newException(StanceError, "zone must be a string")
+    zone = parseZone(payload["zone"].getStr())
+
+  var riskMilli = 500'i32
+  if payload.hasKey("risk"):
+    let riskNode = payload["risk"]
+    let riskVal =
+      case riskNode.kind
+      of JInt: float(riskNode.getBiggestInt())
+      of JFloat: riskNode.getFloat()
       else:
-        result.leadTicks = 14
-    if payload.hasKey("fire") and payload["fire"].kind == JString:
-      result.fire = parseFire(payload["fire"].getStr())
-      inc usable
-    if payload.hasKey("say") and payload["say"].kind == JString:
-      result.say = sanitizeSay(payload["say"].getStr())
-      inc usable
+        raise newException(StanceError, "risk must be a number in 0..1")
+    if riskVal != riskVal or riskVal < 0.0 or riskVal > 1.0:
+      raise newException(StanceError, "risk out of range 0..1")
+    riskMilli = int32(clamp(int(riskVal * 1000.0 + 0.5), 0, 1000))
 
-  if usable == 0:
-    raise newException(StanceError, "reply carried no usable stance field")
+  var leadTicks = 14'i32
+  if payload.hasKey("lead_ticks"):
+    if payload["lead_ticks"].kind != JInt:
+      raise newException(StanceError, "lead_ticks must be an integer in 0..48")
+    let leadVal = payload["lead_ticks"].getBiggestInt()
+    if leadVal < 0 or leadVal > 48:
+      raise newException(StanceError, "lead_ticks out of range 0..48")
+    leadTicks = int32(leadVal)
+
+  var fire = fmAuto
+  if payload.hasKey("fire"):
+    if payload["fire"].kind != JString:
+      raise newException(StanceError, "fire must be a string")
+    fire = parseFire(payload["fire"].getStr())
+
+  var note = ""
+  if payload.hasKey("note"):
+    if payload["note"].kind != JString:
+      raise newException(StanceError, "note must be a string")
+    note = sanitizeNote(payload["note"].getStr())
+
+  var say = ""
+  if payload.hasKey("say"):
+    if payload["say"].kind != JString:
+      raise newException(StanceError, "say must be a string")
+    say = sanitizeSay(payload["say"].getStr())
+
+  LaneStance(
+    note: note,
+    mode: mode,
+    zone: zone,
+    riskMilli: riskMilli,
+    leadTicks: leadTicks,
+    fire: fire,
+    say: say,
+    source: stLlm,
+    latencyMs: 0
+  )
 
 proc actionJson*(stance: LaneStance): JsonNode =
   %*{"note": stance.note, "mode": $stance.mode, "zone": $stance.zone,
@@ -346,6 +294,14 @@ proc fallbackRecord*(
     "attempt": attempt,
     "cause": cause,
     "detail": detail.truncateRunes(MaxFallbackDetailRunes)
+  })
+
+proc missedTurnRecord*(turn, seat: int, cause: string): string =
+  $(%*{
+    "k": "missed_turn",
+    "turn": turn,
+    "seat": seat,
+    "cause": cause
   })
 
 proc budgetGuardRecord*(turn, remainingSeconds: int): string =

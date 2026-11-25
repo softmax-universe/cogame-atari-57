@@ -8,33 +8,39 @@ take**.
 
 ## The reply
 
+Minimal valid reply:
+
+```json
+{"mode": "hunt"}
+```
+
+Full reply with optional settings:
+
 ```json
 {"note": "power pellet 62 ticks away in sw and nothing is chasing me there; take it, then cash the chain",
  "mode": "hunt", "zone": "sw", "risk": 0.55, "lead_ticks": 16,
  "fire": "auto", "say": "going for the power"}
 ```
 
-| field | type | legal values | repair when violated |
-|---|---|---|---|
-| `note` | string | ≤ 160 runes | truncated on a rune boundary |
-| `mode` | string | `clear`, `hunt`, `strike`, `safe`, `bank` | unrecognised → last turn's `mode`, else `clear` |
-| `zone` | string | `nw`, `ne`, `sw`, `se`, `centre`, `left`, `right`, `top`, `bottom`, `none` | unrecognised → `none` |
-| `risk` | number | clamped `[0, 1]`, quantised to a permille | non-finite → last turn's, else `0.5` |
-| `lead_ticks` | integer | clamped `[0, 48]` | non-finite → `14` |
-| `fire` | string | `auto`, `hold`, `never` — GALLERY only | unrecognised → `auto` |
-| `say` | string | ≤ 48 runes | truncated, then printable-ASCII sanitised |
+| field | type | required | default when omitted | legal values |
+|---|---|---|---|---|
+| `mode` | string | **required** | — | `clear`, `hunt`, `strike`, `safe`, `bank` |
+| `zone` | string | optional | `"none"` | `nw`, `ne`, `sw`, `se`, `centre`, `left`, `right`, `top`, `bottom`, `none` |
+| `risk` | number | optional | `0.5` | finite JSON number in `[0, 1]`, quantised to a permille |
+| `lead_ticks` | integer | optional | `14` | JSON integer in `[0, 48]` |
+| `fire` | string | optional | `"auto"` | `auto`, `hold`, `never` (GALLERY only) |
+| `note` | string | optional | `""` | ≤ 160 runes (truncated on a rune boundary) |
+| `say` | string | optional | `""` | ≤ 48 runes (truncated, then printable-ASCII sanitised) |
 
-**Parsing is tolerant.** Markdown fences are stripped; prose before or after the
-object is ignored (the outermost balanced `{…}` wins); numeric strings are
-accepted; a `risk` above 1 is read as a percentage and divided by 100; `mode`,
-`zone` and `fire` are matched case-insensitively with synonyms —
-`greedy`/`collect` → `clear`, `attack` → `strike`, `chase` → `hunt`,
-`defend`/`dodge` → `safe`, `survive`/`turtle` → `bank`; `"north-west"`,
-`"top left"`, `"upper left"` → `nw` (and the mirrors), `"middle"` → `centre`,
-`"anywhere"` → `none`; `"always"` → `auto`, `"off"` → `never`.
-
-Only when **no usable field at all** can be recovered do the single retry and
-then the scripted fallback fire.
+**Parsing is strict.** Reply with a single canonical JSON object, optionally
+wrapped in a standard outer Markdown JSON fence (` ```json ... ``` ` or
+` ``` ... ``` `). Only `mode` is required; omitted optional fields always take
+the fixed documented defaults above (never inherited from a previous turn).
+Surrounding prose, synonyms, numeric strings, percentages, out-of-range values,
+and invalid supplied optional fields are rejected (never guessed or corrected).
+After one retry, a failed model turn records a missed turn (`fallback` +
+`missed_turn`), synthesizes no stance, and emits a zero physical control byte
+(`0`).
 
 ## What each mode does
 
@@ -105,9 +111,8 @@ the clock:
 Both ship in the same image and emit the identical object, so they are directly
 comparable with prompt and trained policies.
 
-**`arcader`** (`PLAYER_SCRIPTED=arcader`) — the certification player, the
-per-turn fallback and the default for a seat that registers with neither env
-var:
+**`arcader`** (`PLAYER_SCRIPTED=arcader`) — the certification player and the
+default scripted baseline:
 
 1. lane over → `safe`, risk 0, `fire: never`;
 2. else `powerTicksLeft > 48` → `strike`, risk 0.85, lead 10;

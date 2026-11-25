@@ -57,11 +57,9 @@ const ArcaderSayings* = [
 ]
 
 proc parseBaseline*(text: string): Baseline =
-  ## `PLAYER_SCRIPTED` values. Anything unrecognised is `arcader`: a seat that
-  ## says nothing useful still plays the published default rather than
-  ## sitting out.
+  ## `PLAYER_SCRIPTED` values: `"arcader"` or `"hoover"`.
   case text.strip().toLowerAscii()
-  of "hoover", "hoov", "greedy": blHoover
+  of "hoover": blHoover
   else: blArcader
 
 type

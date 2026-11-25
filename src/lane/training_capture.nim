@@ -33,7 +33,7 @@ proc flushTurn*(capture: MatchCapture, endTick: int, terminal = false) =
       "post_tick_hashes": physical.hashes}
     capture.trajectory.recordDecision($physical.startTick & "-" & $seat, $seat,
       observation, issued.attempts, issued.selectedAttemptId, issued.executedAction,
-      issued.status, terminal, if issued.status == asFallback: some("engine-arcader") else: none(string))
+      issued.status, terminal, none(string))
   capture.pending = false
 
 proc beginTurn*(capture: MatchCapture, engine: DecisionEngine, sim: SimServer,

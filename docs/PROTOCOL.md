@@ -57,9 +57,7 @@ rival's {alias, score, lives, screen} and nothing else. The reply is:
 
 Parsing is strict against the canonical JSON schema (only `mode` is required;
 omitted optional fields use fixed defaults; an outer Markdown JSON fence is
-accepted). Invalid or unavailable model replies receive one retry and then
-record a missed turn (`fallback` + `missed_turn`) with no synthesized stance
-and a zero physical control byte (`0`).
+accepted). A missing, unavailable or invalid active player's stance ends the episode unscored before the simulator advances. The host preserves the private attempt and declares the responsible seat through COGAME_PLAYER_FAILURE_URI.
 
 ## THE SPECTATOR SOCKET (ws://<game>/global) AND THE REPLAY BYTES
 

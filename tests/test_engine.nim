@@ -23,10 +23,13 @@ proc fakeBatch(calls: seq[BatchCall], timeoutSeconds: int): seq[BatchReply]
       of "good":
         reply.ok = true
         reply.action = GoodAction
+      of "minimal":
+        reply.ok = true
+        reply.action = """{"mode":"hunt"}"""
       of "malformed":
         reply.ok = true
         reply.action = "no stance"
-      of "throttled", "no_endpoint", "timeout":
+      of "throttled", "no_endpoint", "auth_error", "transport_error", "timeout":
         reply.cause = behavior
         reply.error = behavior
       else:
@@ -186,7 +189,43 @@ proc testNoCredentialsFallsBackInstantly() =
   check(batchCalls.len == 1, "missing credentials were retried")
   check(records.anyIt(parseJson(it){"cause"}.getStr() == "no_endpoint"),
     "the player cause did not reach the replay")
-  report("missing player credentials yield typed fallbacks")
+  check(engine.infraFault and engine.infraFaultCause == "no_endpoint" and
+    engine.hasUnrecoveredInfraOutage().fault,
+    "missing endpoint must flag an infrastructure outage fault")
+  report("missing player credentials fail fast and flag infrastructure outage")
+
+proc testAuthOutageAndOccasionalMissedTurn() =
+  resetFake("auth_error")
+  var config = testConfig(RomChomper, 5_140_913)
+  config.turnSpacingMs = 0
+  var game = seatedSim(config)
+  var engine = llmEngine(game)
+  let records = engine.turn(game, 0, 24, 0)
+  check(batchCalls.len == 1, "auth_error was retried")
+  check(records.anyIt(parseJson(it){"cause"}.getStr() == "auth_error"),
+    "auth_error cause did not reach the replay")
+  check(engine.infraFault and engine.infraFaultCause == "auth_error",
+    "auth_error must flag an infrastructure outage fault")
+
+  # Persistent transport_error with zero accepted turns is an unrecovered outage.
+  resetFake("transport_error")
+  var outageEngine = llmEngine(game)
+  discard outageEngine.turn(game, 0, 24, 0)
+  check(not outageEngine.infraFault, "single transport_error should not hard-fault mid-episode")
+  check(outageEngine.hasUnrecoveredInfraOutage().fault,
+    "zero accepted turns with transport_error must not complete as a scored episode")
+
+  # An occasionally missing real-time turn after a successful minimal-mode turn is allowed.
+  resetFake("minimal")
+  var mixedEngine = llmEngine(game)
+  discard mixedEngine.turn(game, 0, 24, 0)
+  check(mixedEngine.acceptedLlmTurns[0] == 1 and mixedEngine.stances[0].mode == mdHunt,
+    "minimal mode-only reply did not install")
+  resetFake("transport_error")
+  discard mixedEngine.turn(game, 1, 24, 0)
+  check(not mixedEngine.infraFault and not mixedEngine.hasUnrecoveredInfraOutage().fault,
+    "an occasionally missing real-time turn should still allow a normal episode")
+  report("auth/persistent outage faults; occasional missed real-time turn is allowed")
 
 proc testMinTicksHoldsTheEpisodeOpen() =
   ## The episode does not end on "all four lanes over" before `minTicks`: a
@@ -236,6 +275,7 @@ when isMainModule:
   testUnregisteredSeatDoesNotPlayBaseline()
   testBudgetGuard()
   testNoCredentialsFallsBackInstantly()
+  testAuthOutageAndOccasionalMissedTurn()
   testMinTicksHoldsTheEpisodeOpen()
   testWallClockStopIsRecorded()
   echo "test_engine OK"

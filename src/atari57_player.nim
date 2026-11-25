@@ -136,8 +136,9 @@ when isMainModule:
               let response = parseJson(numericClient.postContent(numericUrl, $request))
               reply["action"] = candidateStance(view, response["choice"].getInt())
             elif kind == "prompt" and client.disabled:
-              reply["cause"] = %"no_endpoint"
-              reply["error"] = %"no_endpoint"
+              let cause = if client.authFailed: "auth_error" else: "no_endpoint"
+              reply["cause"] = %cause
+              reply["error"] = %cause
             else:
               try:
                 var user = userMessage(prompt, $decision["view"])
@@ -167,8 +168,10 @@ when isMainModule:
                 reply["cause"] = %"parse_error"
                 reply["error"] = %"parse_error"
               except CatchableError as error:
-                reply["cause"] = %(if client != nil and client.throttled:
-                    "throttled" else: "transport_error")
+                reply["cause"] = %(
+                  if client != nil and client.authFailed: "auth_error"
+                  elif client != nil and client.throttled: "throttled"
+                  else: "transport_error")
                 reply["error"] = reply["cause"]
             reply["training_attempt"] = attemptEvidenceJson(evidence)
             socket.send($reply, TextMessage)

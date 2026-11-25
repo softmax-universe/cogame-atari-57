@@ -16,6 +16,7 @@ type
     model*: string
     maxOutputTokens*: int
     disabled*: bool
+    authFailed*: bool
     throttled*: bool
   LlmError* = object of ValueError
 
@@ -34,6 +35,7 @@ proc requestFor*(client: LlmClient, system, user: string,
   if client.disabled:
     raise newException(LlmError, "native inference endpoint is not configured")
   client.throttled = false
+  client.authFailed = false
   result.url = client.sidecarEndpoint & "/v1/messages"
   result.headers["content-type"] = "application/json"
   result.headers["anthropic-version"] = AnthropicVersion
@@ -48,6 +50,7 @@ proc textOf*(client: LlmClient, response: Response, error: string): string =
     raise newException(LlmError, "native inference transport failed")
   if response.code == 401 or response.code == 403:
     client.disabled = true
+    client.authFailed = true
     raise newException(LlmError, "native inference auth failed (" & $response.code & ")")
   if response.code == 429:
     client.throttled = true

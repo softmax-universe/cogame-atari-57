@@ -895,6 +895,11 @@ proc runServerLoop*(
         for record in records:
           replayWriter.writeChat(tickTime(game.tickCount), 0, record)
           game.applyControlRecord(record)
+        if engine.infraFault:
+          echo "atari-57: infrastructure outage on seat ", engine.infraFaultSeat,
+            " (", engine.infraFaultCause, "); faulting episode"
+          game.finishGame(ReasonFault, EndRuleHostError)
+          quitAfterFrame = true
         for seat in 0 ..< 4:
           if not engine.haveStance[seat]:
             continue
@@ -925,7 +930,7 @@ proc runServerLoop*(
     if replayLoaded:
       frameEvents = replayPlayer.advanceReplayFrame(
         game, broadcastTracker, replaySeekTicks, replayCommands)
-    else:
+    elif not quitAfterFrame:
       var faultRule = ""
       let phaseBefore = game.phase
       try:
@@ -951,6 +956,13 @@ proc runServerLoop*(
             collectedEvents.add(event)
           game.events.setLen(0)
         if phaseBefore != GameOver and game.phase == GameOver:
+          let outage = engine.hasUnrecoveredInfraOutage()
+          if game.endReason == ReasonComplete and outage.fault:
+            echo "atari-57: unrecovered provider outage on seat ", outage.seat,
+              " (", outage.cause, "); faulting episode instead of scoring"
+            game.endReason = ReasonFault
+            game.endRule = EndRuleHostError
+            game.timeLimitReached = false
           quitAfterFrame = true
 
     if not replayLoaded and config.fastMode:

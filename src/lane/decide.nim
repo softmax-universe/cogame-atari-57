@@ -68,6 +68,11 @@ type
     lastBatchStart*: MonoTime
     batchStarted*: bool
     llmOff*: bool              ## the budget guard fired; scripted from here on
+    acceptedLlmTurns*: seq[int]
+    infraFailures*: seq[int]
+    infraFault*: bool
+    infraFaultSeat*: int
+    infraFaultCause*: string
     records*: seq[string]
     decisions*: seq[TurnDecision]
 
@@ -75,10 +80,24 @@ proc initDecisionEngine*(sim: SimServer): DecisionEngine =
   result.seats = newSeq[SeatPolicy](4)
   result.stances = newSeq[LaneStance](4)
   result.haveStance = newSeq[bool](4)
+  result.acceptedLlmTurns = newSeq[int](4)
+  result.infraFailures = newSeq[int](4)
+  result.infraFaultSeat = -1
   for i in 0 ..< result.seats.len:
     result.seats[i].baseline = blArcader
     result.seats[i].label = "unregistered"
     result.stances[i] = DefaultStance
+
+proc hasUnrecoveredInfraOutage*(
+  engine: DecisionEngine
+): tuple[fault: bool, seat: int, cause: string] =
+  if engine.infraFault:
+    return (true, engine.infraFaultSeat, engine.infraFaultCause)
+  for seat in 0 ..< engine.seats.len:
+    if engine.seats[seat].registered and engine.seats[seat].isLlm and
+        engine.acceptedLlmTurns[seat] == 0 and engine.infraFailures[seat] > 0:
+      return (true, seat, "provider_outage")
+  (false, -1, "")
 
 proc policyKind*(engine: DecisionEngine, seat: int): string =
   if seat >= 0 and seat < engine.seats.len and
@@ -257,6 +276,7 @@ proc turn*(
         engine.decisions[seat].status = asAccepted
         engine.stances[seat] = stance
         engine.haveStance[seat] = true
+        inc engine.acceptedLlmTurns[seat]
       except CatchableError as error:
         result.add(fallbackRecord(turnIndex, seat, attempt + 1, cause,
                                   cause))
@@ -271,7 +291,7 @@ proc turn*(
     inc attempt
     var retryable: seq[int]
     for seat in open:
-      if lastCause[seat] in ["throttled", "no_endpoint"]:
+      if lastCause[seat] in ["throttled", "no_endpoint", "auth_error"]:
         failFast.add(seat)
       else:
         retryable.add(seat)
@@ -282,6 +302,14 @@ proc turn*(
   for seat in open:
     engine.haveStance[seat] = false
     let cause = if lastCause[seat].len > 0: lastCause[seat] else: "timeout"
+    if cause in ["no_endpoint", "auth_error"]:
+      inc engine.infraFailures[seat]
+      if not engine.infraFault:
+        engine.infraFault = true
+        engine.infraFaultSeat = seat
+        engine.infraFaultCause = cause
+    elif cause in ["transport_error", "throttled", "timeout"]:
+      inc engine.infraFailures[seat]
     result.add(fallbackRecord(turnIndex, seat, 2, cause,
       "missed turn; zero control byte (0)"))
     result.add(missedTurnRecord(turnIndex, seat, cause))

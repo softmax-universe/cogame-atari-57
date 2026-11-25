@@ -454,18 +454,16 @@ proc runFrameLimiter(
     sleep(max(1, min(2, int(remaining.inMilliseconds))))
   previousTick = getMonoTime()
 
-proc declarePlayerFailure(slot: int, message: string) =
-  ## Publishes the game-declared terminal player failure the platform runner
-  ## polls for, so a lobby no-show is charged to the seat that caused it
-  ## rather than poisoning the whole episode unattributed. Best-effort:
-  ## outside the platform (env unset) this is a no-op.
-  try:
-    writeCogameEnv(
-      "COGAME_PLAYER_FAILURE_URI",
-      $(%*{"failed_policy_index": slot, "message": message}),
-      "application/json")
-  except CatchableError as e:
-    echo "player-failure declaration failed: ", e.msg
+proc failPlayer(slot: int, kind, message: string, capture: Option[MatchCapture],
+    tick: int, trajectoryUri: string) =
+  let failure = %*{"failed_policy_index": slot, "kind": kind, "message": message}
+  if capture.isSome:
+    capture.get().flushTurn(tick, true)
+    capture.get().trajectory.finish(esFailed, failure, newJObject())
+    capture.get().trajectory.writeEventsToUri(trajectoryUri)
+  writeCogameEnv("COGAME_PLAYER_FAILURE_URI", $failure, "application/json")
+  echo "atari-57: unscored failure on seat ", slot, ": ", message
+  quit(1)
 
 proc parseRegistration(
   text: string
@@ -670,7 +668,6 @@ proc runServerLoop*(
     engine = if laneMode: initDecisionEngine(game) else: DecisionEngine()
     controls: array[4, ControlLane]
     lanesBuilt = false
-    forceStart = false
     lastTurnKey = -1
     episodeStart = getMonoTime()
     quitAfterFrame = false
@@ -718,17 +715,8 @@ proc runServerLoop*(
         appState.closedSockets.setLen(0)
 
         if laneMode and not lanesBuilt and game.lobbyJoinTimedOut():
-          ## A seat that never connects does NOT end the episode: report the
-          ## no-show, then seat its lane anyway and let the `arcader` baseline
-          ## drive it for the whole run.
-          let stuckSlot = game.nextPlayerSlot()
-          declarePlayerFailure(
-            stuckSlot,
-            "player slot " & $stuckSlot & " never joined the lobby within " &
-              $config.lobbyJoinTimeoutTicks & " lobby ticks (~" &
-              $(config.lobbyJoinTimeoutTicks div TargetFps) &
-              "s); its lane plays the arcader baseline")
-          forceStart = true
+          failPlayer(game.nextPlayerSlot(), "episode_inconclusive", "player never joined the lobby",
+            capture, game.tickCount, trajectoryUri)
 
         if not replayLoaded:
           var newSockets: seq[WebSocket] = @[]
@@ -775,7 +763,7 @@ proc runServerLoop*(
               progressed = true
 
           if laneMode and not lanesBuilt and game.phase == Lobby and
-              (game.players.len >= config.numAgents or forceStart):
+              (game.players.len >= config.numAgents):
             ## Seat every lane that has no live connection with a trusted
             ## join carrying ONLY its anonymous alias, so the replay's join
             ## stream leaks no policy identity and no lane is ever uncommanded.
@@ -895,11 +883,12 @@ proc runServerLoop*(
         for record in records:
           replayWriter.writeChat(tickTime(game.tickCount), 0, record)
           game.applyControlRecord(record)
-        if engine.infraFault:
-          echo "atari-57: infrastructure outage on seat ", engine.infraFaultSeat,
-            " (", engine.infraFaultCause, "); faulting episode"
-          game.finishGame(ReasonFault, EndRuleHostError)
-          quitAfterFrame = true
+        for seat in 0 ..< 4:
+          if not game.laneIsOver(seat) and not engine.haveStance[seat]:
+            let cause = engine.decisions[seat].failureCause
+            let kind = if cause in ["no_endpoint", "auth_error", "throttled", "transport_error", "timeout", "budget_guard", "unregistered"]:
+              "episode_inconclusive" else: "player_error"
+            failPlayer(seat, kind, "no valid stance: " & cause, capture, game.tickCount, trajectoryUri)
         for seat in 0 ..< 4:
           if not engine.haveStance[seat]:
             continue

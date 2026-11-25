@@ -54,6 +54,7 @@ type
     registered*: bool
 
   TurnDecision* = object
+    failureCause*: string
     observation*: JsonNode
     attempts*: seq[DecisionAttempt]
     selectedAttemptId*: Option[string]
@@ -170,6 +171,7 @@ proc turn*(
     elif not engine.seats[seat].registered:
       # Missing registration never silently selects a baseline.
       engine.haveStance[seat] = false
+      engine.decisions[seat].failureCause = "unregistered"
       result.add(fallbackRecord(turnIndex, seat, 1, "unregistered",
         "seat never registered; missed turn (zero control byte)"))
       result.add(missedTurnRecord(turnIndex, seat, "unregistered"))
@@ -183,6 +185,7 @@ proc turn*(
       # (zero physical control byte; no synthesized stance).
       engine.haveStance[seat] = false
       let cause = if engine.llmOff: "budget_guard" else: "transport_error"
+      engine.decisions[seat].failureCause = cause
       result.add(fallbackRecord(turnIndex, seat, 1, cause,
         "the LLM is unavailable for this turn; missed turn (zero control byte)"))
       result.add(missedTurnRecord(turnIndex, seat, cause))
@@ -310,6 +313,7 @@ proc turn*(
         engine.infraFaultCause = cause
     elif cause in ["transport_error", "throttled", "timeout"]:
       inc engine.infraFailures[seat]
+    engine.decisions[seat].failureCause = cause
     result.add(fallbackRecord(turnIndex, seat, 2, cause,
       "missed turn; zero control byte (0)"))
     result.add(missedTurnRecord(turnIndex, seat, cause))

@@ -219,7 +219,7 @@ jobs:
                   body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
                   slot = self.headers.get("X-Coworld-Player-Slot", "")
                   with open(log_file, "a") as fh:
-                      fh.write(json.dumps({"path": self.path, "slot": slot, "model": body.get("model")}) + "\n")
+                      fh.write(json.dumps({"path": self.path, "slot": slot, "max_tokens": body.get("max_tokens")}) + "\n")
                   payload = json.dumps({
                       "id": "msg_ci_" + uuid.uuid4().hex[:8],
                       "type": "message",
@@ -247,6 +247,8 @@ jobs:
             sleep 0.1
           done
           fixture_port="$(cat "${fixture_port_file}")"
+          export SMOKE_MANIFEST="$RUNNER_TEMP/atari-output-budget.json"
+          jq '.certification.game_config.maxOutputTokens = 2048' coworld_manifest_template.json > "$SMOKE_MANIFEST"
           COWORLD_LLM_ENDPOINT="http://host.docker.internal:${fixture_port}" \
             ./tools/ci/docker_smoke.sh "${IMAGE}:ci"
           python3 - "${fixture_log}" "dist/smoke/results.json" <<'PY'
@@ -255,6 +257,7 @@ jobs:
           results = json.load(open(sys.argv[2]))
           assert len(calls) > 0, f"expected nonzero HTTP calls from atari-57-text, got {calls}"
           assert all(c["path"] == "/v1/messages" and c["slot"] == "0" for c in calls), calls
+          assert all(c["max_tokens"] == 2048 for c in calls), calls
           assert results["reason"] == "complete", results
           assert results["llmTurns"][0] > 0, results
           print(f"smoke HTTP verified: calls={len(calls)} llmTurns={results['llmTurns']} points={results['points']}")

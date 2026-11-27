@@ -14,22 +14,20 @@ type
     curl*: Curly
     sidecarEndpoint: string
     model*: string
-    maxOutputTokens*: int
     disabled*: bool
     authFailed*: bool
     throttled*: bool
   LlmError* = object of ValueError
 
-proc newLlmClient*(config: GameConfig): LlmClient =
-  result = LlmClient(model: getEnv("COWORLD_LLM_MODEL", "anthropic/claude-haiku-4.5"),
-    maxOutputTokens: max(1, config.maxOutputTokens))
+proc newLlmClient*(): LlmClient =
+  result = LlmClient(model: getEnv("COWORLD_LLM_MODEL", "anthropic/claude-haiku-4.5"))
   result.sidecarEndpoint = getEnv("COWORLD_LLM_ENDPOINT").strip().strip(
     chars = {'/'}, leading = false)
   result.disabled = result.sidecarEndpoint.len == 0
   if not result.disabled: result.curl = newCurly()
 
 proc requestFor*(client: LlmClient, system, user: string,
-    slot: int): tuple[url: string, headers: HttpHeaders, body: string] =
+    slot, maxOutputTokens: int): tuple[url: string, headers: HttpHeaders, body: string] =
   if slot < 0 or slot >= MaxPlayers:
     raise newException(LlmError, "native inference requires the issued player slot")
   if client.disabled:
@@ -41,7 +39,7 @@ proc requestFor*(client: LlmClient, system, user: string,
   result.headers["anthropic-version"] = AnthropicVersion
   result.headers["X-Coworld-Player-Slot"] = $slot
   result.body = $(%*{"model": client.model,
-    "max_tokens": client.maxOutputTokens, "system": system,
+    "max_tokens": maxOutputTokens, "system": system,
     "messages": [{"role": "user", "content": user}]})
 
 proc textOf*(client: LlmClient, response: Response, error: string): string =

@@ -34,7 +34,7 @@ A seat registers, acknowledges frames, and answers decision requests.
 4. DECISION. Every 120 ticks (5.0 s) the game sends a JSON WebSocket text
    message to each model seat:
 
-   `{"type":"decision","id":N,"seat":S,"view":{...},"system":"...","retry":false,"timeout_seconds":N}`
+   `{"type":"decision","id":N,"seat":S,"view":{...},"system":"...","retry":false,"timeout_seconds":N,"max_tokens":N}`
 
    The player replies with `{"type":"action","id":N,"action":{...}}` or
    `{"type":"action","id":N,"cause":"throttled","error":"..."}`. The

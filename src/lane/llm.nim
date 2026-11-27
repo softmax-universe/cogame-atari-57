@@ -42,28 +42,6 @@ proc requestFor*(client: LlmClient, system, user: string,
     "max_tokens": maxOutputTokens, "system": system,
     "messages": [{"role": "user", "content": user}]})
 
-proc textOf*(client: LlmClient, response: Response, error: string): string =
-  ## Public fallback exposes stable causes, never private received bytes or URLs.
-  if error.len > 0:
-    raise newException(LlmError, "native inference transport failed")
-  if response.code == 401 or response.code == 403:
-    client.disabled = true
-    client.authFailed = true
-    raise newException(LlmError, "native inference auth failed (" & $response.code & ")")
-  if response.code == 429:
-    client.throttled = true
-    raise newException(LlmError, "native inference throttled (429)")
-  if response.code < 200 or response.code >= 300:
-    raise newException(LlmError, "native inference error " & $response.code)
-  let payload = parseJson(response.body)
-  if payload{"stop_reason"}.getStr() == "refusal":
-    raise newException(LlmError, "native inference refusal")
-  for contentBlock in payload["content"]:
-    if contentBlock{"type"}.getStr() == "text":
-      result.add(contentBlock{"text"}.getStr())
-  if payload{"stop_reason"}.getStr() == "max_tokens" and '{' notin result:
-    raise newException(LlmError, "native reply ended before a JSON action")
-
 proc responseEvidence*(attempt: var DecisionAttempt, headers: HttpHeaders, body: string) =
   ## Preserve native metadata before the existing domain completion parser runs.
   attempt.rawResponse = %body
@@ -103,3 +81,20 @@ proc completionEvidence*(attempt: var DecisionAttempt, payload: JsonNode) =
       for probability in sampling["behavior_log_probs"]: probabilities.add(probability.getFloat())
       attempt.behaviorLogprobs = some(probabilities)
     attempt.stopReason = some(sampling["stop_reason"].getStr())
+
+proc completionText*(client: LlmClient, response: Response, attempt: var DecisionAttempt): string =
+  if response.code == 401 or response.code == 403:
+    client.disabled = true
+    client.authFailed = true
+    raise newException(LlmError, "native inference auth failed (" & $response.code & ")")
+  if response.code == 429:
+    client.throttled = true
+    raise newException(LlmError, "native inference throttled (429)")
+  if response.code < 200 or response.code >= 300:
+    raise newException(LlmError, "native inference error " & $response.code)
+  let payload = parseJson(response.body)
+  attempt.completionEvidence(payload)
+  for contentBlock in payload["content"]:
+    if contentBlock{"type"}.getStr() == "text":
+      result.add(contentBlock{"text"}.getStr())
+  attempt.response = %result

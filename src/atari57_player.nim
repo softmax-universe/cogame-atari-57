@@ -6,7 +6,7 @@ import
   std/[httpclient, json, monotimes, options, os, strutils, sysrand, times],
   bitworld/[spriteprotocol, decision_trajectory],
   whisky, curly,
-  lane/[llm, sim_config, stances, numeric_codec, prompts]
+  lane/[llm, stances, numeric_codec, prompts]
 
 const
   ConnectAttempts = 240      ## 240 x 500 ms = 2 minutes of dialling.
@@ -65,7 +65,7 @@ when isMainModule:
     kind,
     " baseline=", (if kind == "scripted": scripted else: "none"),
     " label=", label
-  let client = if kind == "prompt": newLlmClient(defaultGameConfig()) else: nil
+  let client = if kind == "prompt": newLlmClient() else: nil
 
   doAssert numericUrl.len == 0 or prompt.len == 0
   let numericClient = newHttpClient(timeout = 5000)
@@ -144,13 +144,14 @@ when isMainModule:
                 var user = userMessage(prompt, $decision["view"])
                 if decision["retry"].getBool():
                   user.add("\n\nYour previous reply was unusable. Return only JSON.")
+                let maxOutputTokens = decision["max_tokens"].getInt()
                 let request = client.requestFor(
-                  decision["system"].getStr(), user, decision["seat"].getInt())
+                  decision["system"].getStr(), user, decision["seat"].getInt(), maxOutputTokens)
                 evidence.prompt = %*[{"role": "system", "content": decision["system"]},
                   {"role": "user", "content": user}]
                 evidence.request = parseJson(request.body)
                 evidence.model = some(client.model)
-                evidence.decoder = %*{"max_tokens": client.maxOutputTokens}
+                evidence.decoder = %*{"max_tokens": maxOutputTokens}
                 socket.send($( %*{"type": "attempt_started", "id": decision["id"],
                   "training_attempt": attemptEvidenceJson(evidence)}), TextMessage)
                 let started = getMonoTime()

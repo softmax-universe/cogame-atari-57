@@ -155,7 +155,7 @@ proc testHostedPromptRoute() =
   let oldModel = getEnv("COWORLD_LLM_MODEL")
   putEnv("COWORLD_LLM_ENDPOINT", "http://127.0.0.1:9100/")
   putEnv("COWORLD_LLM_MODEL", "anthropic/claude-haiku-4.5")
-  let request = newLlmClient(defaultGameConfig()).requestFor("rules", "private view", 0)
+  let request = newLlmClient().requestFor("rules", "private view", 0, defaultGameConfig().maxOutputTokens)
   check(request.url == "http://127.0.0.1:9100/v1/messages",
         "the hosted prompt bypasses the model sidecar")
   check(request.headers["anthropic-version"] == "2023-06-01",

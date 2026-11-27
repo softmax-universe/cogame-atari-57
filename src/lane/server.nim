@@ -491,6 +491,7 @@ proc parseRegistration(
 proc playerBatch(
   seatSockets: array[4, WebSocket],
   seatConnected: array[4, bool],
+  maxOutputTokens: int,
   selection: PromptSelection
 ): BatchFn =
   result = proc(calls: seq[BatchCall], timeoutSeconds: int): seq[BatchReply]
@@ -513,7 +514,7 @@ proc playerBatch(
         seatSockets[call.seat].send($( %*{
           "type": "decision", "id": requestId, "seat": call.seat,
           "view": parseJson(call.view), "system": selection.systemPrompt(),
-          "retry": call.retry, "timeout_seconds": timeoutSeconds
+          "retry": call.retry, "timeout_seconds": timeoutSeconds, "max_tokens": maxOutputTokens
         }), TextMessage)
       except CatchableError as error:
         result[position].error = error.msg
@@ -876,7 +877,7 @@ proc runServerLoop*(
               ## silently selects a scripted baseline.
               echo "ERROR: SEAT ", seat, " NEVER REGISTERED — emitting zero control byte (0)"
               game.seatPolicyKind[seat] = "llm"
-        engine.batch = playerBatch(seatSockets, seatConnected, selection)
+        engine.batch = playerBatch(seatSockets, seatConnected, config.maxOutputTokens, selection)
         let records = engine.turn(
           game, turnIndex, config.turnsPerEpisode(), elapsedSeconds, selection)
         if capture.isSome: capture.get().beginTurn(engine, game, selection)

@@ -25,3 +25,19 @@ block:
   doAssert newLlmClient().disabled,
     "a retired provider credential bypassed the sidecar"
   echo "no endpoint uses game-owned fallback despite retired credentials"
+
+block:
+  var attempt = newDecisionAttempt("0-0", "prompt", aoModel)
+  let client = newLlmClient()
+  let exhausted = Response(code: 200, body: $(%*{
+    "model": "fixture", "stop_reason": "max_tokens", "content": [],
+    "usage": {"input_tokens": 12, "output_tokens": 2048}}))
+  doAssert client.completionText(exhausted, attempt) == ""
+  doAssert attempt.response == %""
+  doAssert attempt.stopReason == some("max_tokens")
+  doAssert attempt.inputTokens == some(12) and attempt.outputTokens == some(2048)
+  var missing = newDecisionAttempt("0-1", "prompt", aoModel)
+  doAssert client.completionText(Response(code: 200, body: "{}"), missing) == ""
+  doAssert missing.stopReason.isNone and missing.outputTokens.isNone
+  doAssertRaises(LlmError):
+    discard client.completionText(Response(code: 503), attempt)

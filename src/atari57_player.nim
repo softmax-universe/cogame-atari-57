@@ -161,9 +161,7 @@ when isMainModule:
                 evidence.responseEvidence(response.headers, response.body)
                 socket.send($( %*{"type": "attempt_response", "id": decision["id"],
                   "training_attempt": attemptEvidenceJson(evidence)}), TextMessage)
-                let text = client.textOf(response, "")
-                evidence.completionEvidence(parseJson(response.body))
-                evidence.response = %text
+                let text = client.completionText(response, evidence)
                 reply["action"] = extractJsonObject(text)
               except StanceError, JsonParsingError:
                 reply["cause"] = %"parse_error"

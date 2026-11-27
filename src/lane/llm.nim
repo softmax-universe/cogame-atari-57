@@ -6,6 +6,7 @@ import
   bitworld/decision_trajectory,
   curly,
   sim_types
+from stances import StanceError
 
 const AnthropicVersion = "2023-06-01"
 
@@ -64,11 +65,15 @@ proc responseEvidence*(attempt: var DecisionAttempt, headers: HttpHeaders, body:
       else: attempt.chatTemplateSha256 = some(headers[header])
 
 proc completionEvidence*(attempt: var DecisionAttempt, payload: JsonNode) =
-  attempt.model = some(payload["model"].getStr())
-  attempt.stopReason = some(payload["stop_reason"].getStr())
-  if payload.hasKey("usage"):
-    attempt.inputTokens = some(payload["usage"]["input_tokens"].getInt())
-    attempt.outputTokens = some(payload["usage"]["output_tokens"].getInt())
+  if payload{"model"} != nil and payload["model"].kind == JString:
+    attempt.model = some(payload["model"].getStr())
+  if payload{"stop_reason"} != nil and payload["stop_reason"].kind == JString:
+    attempt.stopReason = some(payload["stop_reason"].getStr())
+  let usage = payload{"usage"}
+  if usage{"input_tokens"} != nil and usage["input_tokens"].kind == JInt:
+    attempt.inputTokens = some(usage["input_tokens"].getInt())
+  if usage{"output_tokens"} != nil and usage["output_tokens"].kind == JInt:
+    attempt.outputTokens = some(usage["output_tokens"].getInt())
   if payload.hasKey("sampling_evidence") and payload["sampling_evidence"].kind != JNull:
     let sampling = payload["sampling_evidence"]
     var promptIds, sampledIds: seq[int]
@@ -94,7 +99,9 @@ proc completionText*(client: LlmClient, response: Response, attempt: var Decisio
     raise newException(LlmError, "native inference error " & $response.code)
   let payload = parseJson(response.body)
   attempt.completionEvidence(payload)
-  for contentBlock in payload["content"]:
+  for contentBlock in payload{"content"}.getElems():
     if contentBlock{"type"}.getStr() == "text":
       result.add(contentBlock{"text"}.getStr())
   attempt.response = %result
+  if payload{"stop_reason"}.getStr() == "refusal":
+    raise newException(StanceError, "native inference refusal")

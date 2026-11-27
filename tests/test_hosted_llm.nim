@@ -36,5 +36,8 @@ block:
   doAssert attempt.response == %""
   doAssert attempt.stopReason == some("max_tokens")
   doAssert attempt.inputTokens == some(12) and attempt.outputTokens == some(2048)
+  var missing = newDecisionAttempt("0-1", "prompt", aoModel)
+  doAssert client.completionText(Response(code: 200, body: "{}"), missing) == ""
+  doAssert missing.stopReason.isNone and missing.outputTokens.isNone
   doAssertRaises(LlmError):
     discard client.completionText(Response(code: 503), attempt)

@@ -162,8 +162,6 @@ when isMainModule:
                 socket.send($( %*{"type": "attempt_response", "id": decision["id"],
                   "training_attempt": attemptEvidenceJson(evidence)}), TextMessage)
                 let text = client.completionText(response, evidence)
-                if evidence.stopReason == some("refusal"):
-                  raise newException(StanceError, "native inference refusal")
                 reply["action"] = extractJsonObject(text)
               except StanceError, JsonParsingError:
                 reply["cause"] = %"parse_error"
